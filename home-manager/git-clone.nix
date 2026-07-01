@@ -35,8 +35,15 @@ with lib;
       target="$HOME/${relPath}"
       if [ ! -e "$target/.git" ]; then
         $VERBOSE_ECHO "gitClone: ${repo.url} -> ${relPath}"
-        $DRY_RUN_CMD ${pkgs.git}/bin/git clone ${escapeShellArg repo.url} "$target" \
-          || echo "gitClone: WARNING failed to clone ${relPath}"
+        if [ "$(id -u)" = "0" ]; then
+          $DRY_RUN_CMD sudo -u ${config.home.username} \
+            env SSH_AUTH_SOCK="''${SSH_AUTH_SOCK:-}" GIT_SSH_COMMAND="$GIT_SSH_COMMAND" \
+            ${pkgs.git}/bin/git clone ${escapeShellArg repo.url} "$target" \
+            || echo "gitClone: WARNING failed to clone ${relPath}"
+        else
+          $DRY_RUN_CMD ${pkgs.git}/bin/git clone ${escapeShellArg repo.url} "$target" \
+            || echo "gitClone: WARNING failed to clone ${relPath}"
+        fi
       fi
     '') config.home.gitClone));
   };
