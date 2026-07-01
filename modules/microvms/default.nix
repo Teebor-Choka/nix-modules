@@ -122,7 +122,7 @@ in {
       environment.systemPackages = [
         pkgs.socat
 
-        (pkgs.writeShellScriptBin "vm" ''
+        (pkgs.writeShellScriptBin "nix-vm" ''
           set -euo pipefail
 
           FLAKE="${flakeDir}"
@@ -134,7 +134,7 @@ in {
 
           usage() {
             cat <<'EOF'
-          Usage: vm <command> [name]
+          Usage: nix-vm <command> [name]  (alias: vm)
 
           Commands:
             build <name>   Build VM guest image (run before first up, or after rebuild)
@@ -235,6 +235,7 @@ in {
           esac
         '')
       ];
+      home-manager.sharedModules = [{ home.shellAliases.vm = "nix-vm"; }];
     }
 
     # ── macOS only ─────────────────────────────────────────────────────────────
@@ -268,7 +269,7 @@ in {
       };
 
       environment.systemPackages = [
-        (pkgs.writeShellScriptBin "builder" ''
+        (pkgs.writeShellScriptBin "nix-vm-builder" ''
           set -euo pipefail
           FLAKE="${flakeDir}"
           STATE_DIR="$HOME/.local/state/microvm/linux-builder"
@@ -290,7 +291,7 @@ in {
             if ! command -v container >/dev/null 2>&1; then
               echo "✗ 'container' CLI not found — required for first-time bootstrap." >&2
               echo "  Install: brew install --cask container" >&2
-              echo "  Then run 'builder up' again." >&2
+              echo "  Then run 'builder up' (or 'nix-vm-builder up') again." >&2
               exit 1
             fi
 
@@ -412,9 +413,9 @@ BOOTSTRAP
             else
               echo "linux-builder: stopped"
               if runner_is_built; then
-                echo "Image:         built  (run 'builder up' to start)"
+                echo "Image:         built  (run 'builder up' (or 'nix-vm-builder up') to start)"
               else
-                echo "Image:         not built  ('builder up' will auto-bootstrap via Apple Container)"
+                echo "Image:         not built  ('builder up' (or 'nix-vm-builder up') will auto-bootstrap via Apple Container)"
               fi
             fi
           }
@@ -429,12 +430,13 @@ BOOTSTRAP
             *)
               echo "Usage: builder <up|down|status|logs>"
               echo ""
-              echo "First run: 'builder up' bootstraps automatically via Apple Container when"
+              echo "First run: 'builder up' (or 'nix-vm-builder up') bootstraps automatically via Apple Container when"
               echo "the aarch64-linux image is not yet in the nix store (no QEMU required)."
               ;;
           esac
         '')
       ];
+      home-manager.sharedModules = [{ home.shellAliases.builder = "nix-vm-builder"; }];
     })
 
     # ── Linux only ─────────────────────────────────────────────────────────────
