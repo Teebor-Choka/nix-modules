@@ -137,9 +137,10 @@ in {
           Usage: vm <command> [name]
 
           Commands:
-            up   <name>   Start VM (bridges KeePassXC agent, attaches console)
-            down <name>   Tear down agent bridge (poweroff inside VM to stop it)
-            list          Show defined VMs and bridge status
+            build <name>   Build VM guest image (run before first up, or after rebuild)
+            up    <name>   Start VM (bridges KeePassXC agent, attaches console)
+            down  <name>   Tear down agent bridge (poweroff inside VM to stop it)
+            list           Show defined VMs and bridge status
           EOF
             echo ""
             echo "Defined VMs: $DEFINED_VMS"
@@ -187,10 +188,15 @@ in {
               echo "⚠  SSH_AUTH_SOCK not set — agent forwarding disabled"
             fi
 
-            echo "→ Building VM '$name'…"
-            nix build "$FLAKE#microvm-$name"
             echo "→ Launching VM '$name'… (poweroff inside to stop)"
             nix run "$FLAKE#microvm-$name"
+          }
+
+          vm_build() {
+            local name=$1
+            echo "→ Building VM '$name'…"
+            nix build "$FLAKE#microvm-$name"
+            echo "✓ Done"
           }
 
           vm_down() {
@@ -220,6 +226,7 @@ in {
           }
 
           case "''${1:-}" in
+            build)        vm_build "''${2:?'Usage: vm build <name>'}"; ;;
             up)           vm_up   "''${2:?'Usage: vm up <name>'}"; ;;
             down)         vm_down "''${2:?'Usage: vm down <name>'}"; ;;
             list)         vm_list; ;;
