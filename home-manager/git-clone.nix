@@ -26,15 +26,15 @@ with lib;
   };
 
   config = mkIf (config.home.gitClone != {}) {
-    home.activation.gitClone = hm.dag.entryAfter [ "writeBoundary" ] (
-      concatStringsSep "\n" (mapAttrsToList (relPath: repo: ''
-        target="$HOME/${relPath}"
-        if [ ! -e "$target/.git" ]; then
-          $VERBOSE_ECHO "gitClone: ${repo.url} -> ${relPath}"
-          $DRY_RUN_CMD GIT_SSH_COMMAND="${pkgs.openssh}/bin/ssh" ${pkgs.git}/bin/git clone ${escapeShellArg repo.url} "$target" \
-            || echo "gitClone: WARNING failed to clone ${relPath}"
-        fi
-      '') config.home.gitClone)
-    );
+    home.activation.gitClone = hm.dag.entryAfter [ "writeBoundary" ] (''
+      export GIT_SSH_COMMAND="${pkgs.openssh}/bin/ssh"
+    '' + concatStringsSep "\n" (mapAttrsToList (relPath: repo: ''
+      target="$HOME/${relPath}"
+      if [ ! -e "$target/.git" ]; then
+        $VERBOSE_ECHO "gitClone: ${repo.url} -> ${relPath}"
+        $DRY_RUN_CMD ${pkgs.git}/bin/git clone ${escapeShellArg repo.url} "$target" \
+          || echo "gitClone: WARNING failed to clone ${relPath}"
+      fi
+    '') config.home.gitClone));
   };
 }
