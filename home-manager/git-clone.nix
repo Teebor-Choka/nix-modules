@@ -28,6 +28,12 @@ with lib;
   config = mkIf (config.home.gitClone != {}) {
     home.activation.gitClone = hm.dag.entryAfter [ "writeBoundary" ] (''
       export GIT_SSH_COMMAND="${if pkgs.stdenv.isDarwin then "/usr/bin/ssh" else "${pkgs.openssh}/bin/ssh"}"
+      ${optionalString pkgs.stdenv.isDarwin ''
+        if [ -z "''${SSH_AUTH_SOCK:-}" ]; then
+          SSH_AUTH_SOCK=$(/bin/launchctl asuser "$(id -u)" /bin/launchctl getenv SSH_AUTH_SOCK 2>/dev/null || true)
+          export SSH_AUTH_SOCK
+        fi
+      ''}
       if [ -z "''${SSH_AUTH_SOCK:-}" ]; then
         echo "gitClone: WARNING SSH_AUTH_SOCK not set — SSH URL clones will fail."
       fi
@@ -35,15 +41,8 @@ with lib;
       target="$HOME/${relPath}"
       if [ ! -e "$target/.git" ]; then
         $VERBOSE_ECHO "gitClone: ${repo.url} -> ${relPath}"
-        if [ "$(id -u)" = "0" ]; then
-          $DRY_RUN_CMD sudo -u ${config.home.username} \
-            env SSH_AUTH_SOCK="''${SSH_AUTH_SOCK:-}" GIT_SSH_COMMAND="$GIT_SSH_COMMAND" \
-            ${pkgs.git}/bin/git clone ${escapeShellArg repo.url} "$target" \
-            || echo "gitClone: WARNING failed to clone ${relPath}"
-        else
-          $DRY_RUN_CMD ${pkgs.git}/bin/git clone ${escapeShellArg repo.url} "$target" \
-            || echo "gitClone: WARNING failed to clone ${relPath}"
-        fi
+        $DRY_RUN_CMD ${pkgs.git}/bin/git clone ${escapeShellArg repo.url} "$target" \
+          || echo "gitClone: WARNING failed to clone ${relPath}"
       fi
     '') config.home.gitClone));
   };
