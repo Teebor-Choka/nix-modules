@@ -1,5 +1,7 @@
 # home-manager/home.nix
 { config, pkgs, ... }: {
+  imports = [ ./git-clone.nix ];
+
   home.stateVersion = "24.05";
 
   # Tiny, universal utilities everyone should have
