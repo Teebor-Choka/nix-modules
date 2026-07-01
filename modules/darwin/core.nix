@@ -17,6 +17,10 @@
 
   security.pam.services.sudo_local.touchIdAuth = true;
 
+  # Preserve SSH agent socket through sudo so darwin-rebuild switch
+  # can reach the user's SSH agent (KeepassXC, etc.) for git clones.
+  security.sudo.extraConfig = "Defaults env_keep += \"SSH_AUTH_SOCK\"";
+
   # Homebrew
   homebrew = {
     enable = true;
