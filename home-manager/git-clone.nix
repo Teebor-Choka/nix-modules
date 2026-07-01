@@ -27,7 +27,7 @@ with lib;
 
   config = mkIf (config.home.gitClone != {}) {
     home.activation.gitClone = hm.dag.entryAfter [ "writeBoundary" ] (''
-      export GIT_SSH_COMMAND="${pkgs.openssh}/bin/ssh"
+      export GIT_SSH_COMMAND="${if pkgs.stdenv.isDarwin then "/usr/bin/ssh" else "${pkgs.openssh}/bin/ssh"}"
     '' + concatStringsSep "\n" (mapAttrsToList (relPath: repo: ''
       target="$HOME/${relPath}"
       if [ ! -e "$target/.git" ]; then
