@@ -8,6 +8,11 @@ with lib; {
       default = false; 
       description = "Enable native Nix settings. Set to false if using the Determinate Installer."; 
     };
+    fonts = mkOption {
+      type = types.listOf types.package;
+      default = [];
+      description = "Font packages to install system-wide";
+    };
     homebrew = {
       taps = mkOption { type = types.listOf types.str; default = []; };
       brews = mkOption { type = types.listOf types.str; default = []; };
