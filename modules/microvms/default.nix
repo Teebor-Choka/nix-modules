@@ -187,6 +187,8 @@ in {
               echo "⚠  SSH_AUTH_SOCK not set — agent forwarding disabled"
             fi
 
+            echo "→ Building VM '$name'…"
+            nix build "$FLAKE#microvm-$name"
             echo "→ Launching VM '$name'… (poweroff inside to stop)"
             nix run "$FLAKE#microvm-$name"
           }
