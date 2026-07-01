@@ -26,7 +26,7 @@
   environment.variables.EDITOR = "vim";
   environment.shellAliases.sudo = "sudo ";
 
-  fonts.packages = [ pkgs.iosevka pkgs.roboto pkgs.source-code-pro ];
+  fonts.packages = [ pkgs.iosevka-bin pkgs.roboto pkgs.source-code-pro ];
 
   # Home-manager wiring. The module import (darwinModules vs nixosModules) is selected
   # per-class in flake.nix; this configuration is identical on both.
