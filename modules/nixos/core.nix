@@ -9,7 +9,6 @@
   # ── Networking
   networking.hostName = hostname;
   networking.networkmanager.enable = true;
-  users.users."${config.custom.username}".extraGroups = [ "networkmanager" ];
 
   # ── Audio (pipewire replaces pulseaudio)
   security.rtkit.enable = true;
@@ -20,18 +19,26 @@
     pulse.enable = true;
   };
 
-  # ── SSH server (workstation admin / remote access)
-  services.openssh.enable = true;
+  # ── SSH server — cattle control plane (push deploys depend on this; never disable)
+  services.openssh = {
+    enable = true;
+    openFirewall = lib.mkDefault true;           # port 22 reachable; anti-lockout for push deploy
+    settings = {
+      PasswordAuthentication       = lib.mkDefault false;  # keys only
+      KbdInteractiveAuthentication = lib.mkDefault false;
+      PermitRootLogin              = lib.mkDefault "no";
+    };
+  };
 
   # ── Locale / timezone (match darwin defaults; override per-host if needed)
-  time.timeZone = "Europe/Zurich";
-  i18n.defaultLocale = "en_US.UTF-8";
+  time.timeZone = lib.mkDefault "Europe/Zurich";
+  i18n.defaultLocale = lib.mkDefault "en_US.UTF-8";
 
   # ── Primary user
   users.users."${config.custom.username}" = {
     isNormalUser = true;
     shell = pkgs.zsh;
-    extraGroups = [ "wheel" "audio" "video" "input" ];
+    extraGroups = [ "wheel" "audio" "video" "input" "networkmanager" ];
   };
   security.sudo.wheelNeedsPassword = true;
 
@@ -41,6 +48,6 @@
 
   environment.shellAliases.rebuild-me = "sudo nixos-rebuild switch --flake ${config.custom.flakeDir}";
 
-  # ── System state version (NixOS convention)
-  system.stateVersion = "24.05";
+  # ── System state version — overridable so each host can pin its own original value
+  system.stateVersion = lib.mkDefault "24.05";
 }
