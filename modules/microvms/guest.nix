@@ -43,15 +43,8 @@ in {
     mac  = vmSpec.mac;
   }];
 
-  # ── Virtiofs shares: work dir (always) + any extra per-VM shares
-  microvm.shares = [
-    {
-      tag        = "work";
-      source     = vmSpec.workDir;
-      mountPoint = "/home/${vmSpec.user}/work";
-      proto      = "virtiofs";
-    }
-  ] ++ resolvedExtraShares;
+  # ── Virtiofs shares: extra per-VM shares only
+  microvm.shares = resolvedExtraShares;
 
   # ── Persistent volumes (host-side absolute paths; hypervisor reads images from the host)
   microvm.volumes = [

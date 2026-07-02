@@ -40,11 +40,6 @@ let
       timeZone       = mkOption { type = types.str;  default = config.custom.microvmDefaults.timeZone; };
       locale         = mkOption { type = types.str;  default = config.custom.microvmDefaults.locale; };
       autologin      = mkOption { type = types.bool; default = true; };
-      workDir        = mkOption {
-        type    = types.str;
-        default = "${homePrefix}/${config.custom.username}/work/${name}";
-        description = "Host directory exposed as ~/work inside the VM (virtiofs share)";
-      };
       mac            = mkOption {
         type    = types.str;
         default = nameMac name;
@@ -150,7 +145,6 @@ in {
             local name=$1
             local state_dir="$HOME/.local/state/microvm/$name"
             mkdir -p "$state_dir"
-            mkdir -p "$HOME/work/$name"
 
             # Kill any stale bridge first
             if [ -f "$state_dir/bridge.pid" ]; then
