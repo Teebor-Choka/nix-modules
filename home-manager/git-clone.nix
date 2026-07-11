@@ -22,6 +22,11 @@ with lib;
         type = types.str;
         description = "Git remote URL to clone from.";
       };
+      options.depth = mkOption {
+        type = types.nullOr types.int;
+        default = null;
+        description = "Shallow-clone depth. When set, clones with --depth <n> --single-branch.";
+      };
     });
   };
 
@@ -41,7 +46,7 @@ with lib;
       target="$HOME/${relPath}"
       if [ ! -e "$target/.git" ]; then
         $VERBOSE_ECHO "gitClone: ${repo.url} -> ${relPath}"
-        $DRY_RUN_CMD ${pkgs.git}/bin/git clone ${escapeShellArg repo.url} "$target" \
+        $DRY_RUN_CMD ${pkgs.git}/bin/git clone ${optionalString (repo.depth != null) "--depth ${toString repo.depth} --single-branch"} ${escapeShellArg repo.url} "$target" \
           || echo "gitClone: WARNING failed to clone ${relPath}"
       fi
     '') config.home.gitClone));

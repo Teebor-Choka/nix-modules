@@ -13,7 +13,7 @@ let
 
   # Nix store paths for shared pub-key files
   sshPubKeyFiles = lib.mapAttrs' (fname: content:
-    lib.nameValuePair ".ssh/${fname}" { text = content; mode = "0644"; }
+    lib.nameValuePair ".ssh/${fname}" { text = content; }
   ) vmSpec.sshPubKeys;
 
   # Resolved extraShares: derive virtiofs tag from basename(mountPoint) when not set
@@ -23,6 +23,27 @@ let
     mountPoint = s.mountPoint;
     proto      = "virtiofs";
   }) vmSpec.extraShares;
+
+  # ── Non-persistent /home backing ──────────────────────────────────────────────
+  # tmpfs lives in guest RAM (vmSpec.mem); only sensible when RAM comfortably exceeds home size.
+  homeBackingResolved =
+    if vmSpec.homeBacking != "auto" then vmSpec.homeBacking
+    else if vmSpec.mem > 2 * vmSpec.homeSize then "tmpfs" else "disk";
+
+  # Runtime hook: materialize the randomly-named home image (path from $MICROVM_HOME_IMG, set by
+  # the `vm` helper) and emit the hypervisor device arg on stdout. Everything else → stderr.
+  homeDiskArgsScript = pkgs.writeScript "microvm-${vmName}-home-disk-args" ''
+    #!${pkgs.runtimeShell}
+    img="''${MICROVM_HOME_IMG:?MICROVM_HOME_IMG unset — start via the 'vm' helper}"
+    if [ ! -e "$img" ]; then
+      ${pkgs.coreutils}/bin/truncate -s ${toString vmSpec.homeSize}M "$img" 1>&2
+      ${pkgs.e2fsprogs}/bin/mkfs.ext4 -L vmhome "$img" 1>&2
+    fi
+    ${if vmSpec.hypervisor == "vfkit"
+      then ''printf -- '--device virtio-blk,path=%s' "$img"''
+      else ''printf -- '-drive id=vmhome,file=%s,format=raw,if=virtio' "$img"''}
+  '';
+
 in {
   imports = [
     inputs.home-manager.nixosModules.home-manager
@@ -43,22 +64,35 @@ in {
     mac  = vmSpec.mac;
   }];
 
-  # ── Virtiofs shares: extra per-VM shares only
+  # ── Virtiofs shares: extra per-VM shares only (secret/mount mechanisms are the
+  #    consumer's concern — add more via extraShares or an extraModules NixOS module)
   microvm.shares = resolvedExtraShares;
 
-  # ── Persistent volumes (host-side absolute paths; hypervisor reads images from the host)
+  # ── Persistent store overlay volume only; /home is non-persistent (see below)
   microvm.volumes = [
-    {
-      image      = "${stateDir}/home.img";
-      mountPoint = "/home";
-      size       = vmSpec.homeSize;
-    }
     {
       image      = "${stateDir}/store.img";
       mountPoint = "/nix/.rw-store";
       size       = vmSpec.storeSize;
     }
   ];
+
+  # ── Non-persistent /home: tmpfs (RAM) or randomly-named disk image wiped on exit
+  fileSystems."/home" =
+    if homeBackingResolved == "tmpfs"
+    then {
+      device  = "tmpfs";
+      fsType  = "tmpfs";
+      options = [ "mode=0755" "size=${toString vmSpec.homeSize}m" ];
+    }
+    else {
+      device = "/dev/disk/by-label/vmhome";
+      fsType = "ext4";
+    };
+
+  # Disk mode: attach the runtime-random home image via the runner's extraArgsScript hook.
+  microvm.extraArgsScript =
+    lib.mkIf (homeBackingResolved == "disk") "${homeDiskArgsScript}";
 
   # ── Agent device attach — conditional per hypervisor ─────────────────────────
   #
@@ -197,10 +231,7 @@ in {
       # Per-VM SSH config (host aliases for account key selection)
       home.file = lib.mkMerge [
         (lib.mkIf (vmSpec.sshConfig != "") {
-          ".ssh/config" = {
-            text = vmSpec.sshConfig;
-            mode = "0600";
-          };
+          ".ssh/config".text = vmSpec.sshConfig;
         })
         sshPubKeyFiles
       ];

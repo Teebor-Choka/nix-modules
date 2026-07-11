@@ -34,7 +34,7 @@ let
       };
       vcpu           = mkOption { type = types.int;  default = 12; };
       mem            = mkOption { type = types.int;  default = 10240; };
-      homeSize       = mkOption { type = types.int;  default = 20480; };
+      homeSize       = mkOption { type = types.int;  default = 10240; };
       storeSize      = mkOption { type = types.int;  default = 20480; };
       user           = mkOption { type = types.str;  default = config.custom.username; };
       timeZone       = mkOption { type = types.str;  default = config.custom.microvmDefaults.timeZone; };
@@ -91,8 +91,54 @@ let
       };
       vfkitExtraArgs = mkOption { type = types.listOf types.str; default = []; };
       extraModules   = mkOption { type = types.listOf types.unspecified; default = []; };
+
+      # ── Non-persistent /home backing ──────────────────────────────────────────
+      homeBacking = mkOption {
+        type    = types.enum [ "tmpfs" "disk" "auto" ];
+        default = "auto";
+        description = ''
+          Backing for the non-persistent /home. "tmpfs" = guest RAM; "disk" = randomly-named
+          ext4 image wiped on exit (allows concurrent instances of the same VM); "auto" = tmpfs
+          when mem > 2*homeSize, else disk.
+        '';
+      };
+
+      # ── Generic host-side launch hook ─────────────────────────────────────────
+      # Mechanism-agnostic escape hatch: shell run by the `vm` helper just before the VM
+      # starts. Higher-level concerns (credential agents, RAM-disk mounts, secret fetching)
+      # live in the CONSUMER, not this library. In scope: $name, $state_dir, $OS, and
+      # $MICROVM_HOME_IMG (disk mode). Contract: background helpers should write their PID to
+      # "$state_dir/<x>.pid" and listen on "$state_dir/<x>.sock"; the helper's trap kills every
+      # "$state_dir/*.pid" and removes every "$state_dir/*.sock" on exit.
+      hostPreLaunch = mkOption {
+        type    = types.lines;
+        default = "";
+        description = ''
+          Shell executed on the host by the `vm` helper immediately before launching this VM.
+          Use it to wire secret/mount mechanisms (e.g. a vsock credential agent) without this
+          library knowing about them. Guest-side pieces go through extraModules.
+        '';
+      };
     };
   };
+
+  # Resolve the "auto" home backing heuristic (tmpfs lives in guest RAM = spec.mem).
+  resolveHomeBacking = spec:
+    if spec.homeBacking != "auto" then spec.homeBacking
+    else if spec.mem > 2 * spec.homeSize then "tmpfs" else "disk";
+
+  # Baked per-VM home-backing map for the vm helper (name → tmpfs|disk)
+  vmHomeBackingStr = concatStringsSep " " (
+    mapAttrsToList (name: spec: "[${name}]=${resolveHomeBacking spec}") cfg
+  );
+
+  # Per-VM host launch hook dispatch (a shell `case` body). Runs the consumer-provided
+  # hostPreLaunch shell for the VM being started. Multi-line, hence a case (not an assoc map).
+  hostPreLaunchDispatch = concatStringsSep "\n" (mapAttrsToList (name: spec:
+    optionalString (spec.hostPreLaunch != "") ''
+            ${name})
+      ${spec.hostPreLaunch}
+              ;;'') cfg);
 in {
   options.custom = {
     flakeDir = mkOption {
@@ -127,6 +173,9 @@ in {
           # vsock port per VM name — baked in at Nix build time (Linux qemu bridge)
           declare -A VM_VSOCK_PORTS=(${vmPortsStr})
 
+          # Per-VM home backing — baked in at Nix build time
+          declare -A VM_HOME_BACKING=(${vmHomeBackingStr})
+
           usage() {
             cat <<'EOF'
           Usage: nix-vm <command> [name]  (alias: vm)
@@ -152,16 +201,27 @@ in {
               rm -f "$state_dir/bridge.pid"
             fi
 
-            # Trap: bake the VALUE of state_dir into the trap string now (at trap-set time)
-            # so it stays valid when the trap fires after vm_up has returned.
-            # OS is a script-level global — fine to reference by name at fire-time.
+            # Non-persistent /home in disk mode: a randomly-named ext4 image, materialized by the
+            # guest extraArgsScript from $MICROVM_HOME_IMG, wiped on exit. The random name allows
+            # multiple instances of the same VM to run concurrently without image collision.
+            local home_img=""
+            if [ "''${VM_HOME_BACKING[$name]:-tmpfs}" = disk ]; then
+              home_img="$state_dir/home.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ').img"
+              export MICROVM_HOME_IMG="$home_img"
+            fi
+
+            # Generic cleanup trap: kill every helper that registered a PID under the VM state
+            # dir and remove its sockets, plus the ephemeral home image. Consumer hooks
+            # (hostPreLaunch) plug into this by writing "$state_dir/<x>.pid" / "<x>.sock".
+            # The VALUE of state_dir / home_img is baked in now so it survives vm_up returning.
             trap '
-              pid_file="'"$state_dir"'/bridge.pid"
-              if [ -f "$pid_file" ]; then
-                kill "$(cat "$pid_file")" 2>/dev/null || true
-                rm -f "$pid_file"
-              fi
-              [ "$OS" = "Darwin" ] && rm -f "'"$state_dir"'/agent.sock"
+              for pf in "'"$state_dir"'"/*.pid; do
+                [ -e "$pf" ] || continue
+                kill "$(cat "$pf")" 2>/dev/null || true
+                rm -f "$pf"
+              done
+              rm -f "'"$state_dir"'"/*.sock
+              [ -n "'"$home_img"'" ] && rm -f "'"$home_img"'"
             ' EXIT INT TERM
 
             if [ -n "''${SSH_AUTH_SOCK:-}" ]; then
@@ -181,6 +241,12 @@ in {
             else
               echo "⚠  SSH_AUTH_SOCK not set — agent forwarding disabled"
             fi
+
+            # Consumer host hook: mechanism-agnostic escape hatch (credential agents, RAM-disk
+            # mounts, …). Runs with $name, $state_dir, $OS, $MICROVM_HOME_IMG in scope.
+            case "$name" in
+            ${hostPreLaunchDispatch}
+            esac
 
             echo "→ Launching VM '$name'… (poweroff inside to stop)"
             nix run "$FLAKE#microvm-$name"
