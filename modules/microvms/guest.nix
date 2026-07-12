@@ -9,7 +9,13 @@ let
   hostHomePrefix = if vmSpec.hypervisor == "vfkit" then "/Users" else "/home";
   hostHome       = "${hostHomePrefix}/${vmSpec.user}";
   stateDir       = "${hostHome}/.local/state/microvm/${vmName}";
-  agentSock      = "${stateDir}/agent.sock";   # only used by vfkit path below
+  # Relative socket path: the `vm` helper launches each instance from its own working directory,
+  # so vfkit resolves this against that per-instance dir (enables concurrent instances).
+  agentSock      = "agent.sock";               # only used by vfkit path below
+
+  # Share the host /nix/store read-only (vs a per-VM EROFS image). Immutable → safe across
+  # concurrent instances. Adding this share flips microvm.storeOnDisk to false automatically.
+  shareHostStore = vmSpec.storeBacking == "host";
 
   # Nix store paths for shared pub-key files
   sshPubKeyFiles = lib.mapAttrs' (fname: content:
@@ -31,7 +37,8 @@ let
   # Non-persistence comes from the `vm` helper wiping the image on exit; microvm autoCreate then
   # remakes a blank ext4 on the next start.
   homeBackingResolved =
-    if vmSpec.homeBacking != "auto" then vmSpec.homeBacking
+    if vmSpec.persistent then "disk"           # tmpfs can't persist across boots
+    else if vmSpec.homeBacking != "auto" then vmSpec.homeBacking
     else if vmSpec.mem > 2 * vmSpec.homeSize then "tmpfs" else "disk";
 
 in {
@@ -39,7 +46,8 @@ in {
     inputs.home-manager.nixosModules.home-manager
   ];
 
-  # ── Nix store overlay (persistent across reboots via a dedicated volume)
+  # ── Writable store overlay: per-instance RAM. With no volume backing it, the upperdir lives
+  #    on the root tmpfs, so it is isolated per instance and wiped when the VM stops.
   microvm.writableStoreOverlay = "/nix/.rw-store";
 
   # ── Hardware / hypervisor
@@ -54,24 +62,31 @@ in {
     mac  = vmSpec.mac;
   }];
 
-  # ── Virtiofs shares: extra per-VM shares only (secret/mount mechanisms are the
-  #    consumer's concern — add more via extraShares or an extraModules NixOS module)
-  microvm.shares = resolvedExtraShares;
+  # ── Virtiofs shares: extra per-VM shares, plus the read-only host store (host mode).
+  #    The /nix/store share makes microvm.storeOnDisk=false (host store instead of an EROFS image).
+  microvm.shares = resolvedExtraShares
+    ++ lib.optional shareHostStore {
+      source     = "/nix/store";
+      mountPoint = "/nix/.ro-store";
+      tag        = "ro-store";
+      proto      = "virtiofs";
+    };
 
-  # ── Volumes: persistent store overlay + (disk mode) a non-persistent /home image.
-  #    The home.img volume is wiped on exit by the `vm` helper and recreated blank by
-  #    microvm autoCreate on the next start, so /home never persists across boots.
-  microvm.volumes = [
-    {
-      image      = "${stateDir}/store.img";
+  # ── Volumes (RELATIVE image paths → resolved against the launch's working dir):
+  #    - persistent VMs get a writable store.img (overlay persists → package cache) at the fixed
+  #      base dir; ephemeral VMs get no store.img (overlay lives on rootfs tmpfs, per-instance).
+  #    - disk-mode /home gets a home.img (persistent at base dir, or per-instance & wiped).
+  microvm.volumes =
+    lib.optional vmSpec.persistent {
+      image      = "store.img";
       mountPoint = "/nix/.rw-store";
       size       = vmSpec.storeSize;
     }
-  ] ++ lib.optional (homeBackingResolved == "disk") {
-    image      = "${stateDir}/home.img";
-    mountPoint = "/home";
-    size       = vmSpec.homeSize;
-  };
+    ++ lib.optional (homeBackingResolved == "disk") {
+      image      = "home.img";
+      mountPoint = "/home";
+      size       = vmSpec.homeSize;
+    };
 
   # tmpfs mode: /home is RAM-backed (no host device). disk mode mounts /home from the volume above.
   fileSystems."/home" = lib.mkIf (homeBackingResolved == "tmpfs") {

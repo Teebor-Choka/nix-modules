@@ -97,9 +97,36 @@ let
         type    = types.enum [ "tmpfs" "disk" "auto" ];
         default = "auto";
         description = ''
-          Backing for the non-persistent /home. "tmpfs" = guest RAM; "disk" = randomly-named
-          ext4 image wiped on exit (allows concurrent instances of the same VM); "auto" = tmpfs
-          when mem > 2*homeSize, else disk.
+          Backing for the per-instance, non-persistent /home. "tmpfs" = guest RAM; "disk" = a
+          per-instance ext4 image in the launch's working dir, wiped on exit; "auto" = tmpfs when
+          mem > 2*homeSize, else disk. Each `vm up` runs in its own working dir, so multiple
+          instances of the same VM can run concurrently.
+        '';
+      };
+
+      # ── Persistence ───────────────────────────────────────────────────────────
+      persistent = mkOption {
+        type    = types.bool;
+        default = false;
+        description = ''
+          false (default): per-instance ephemeral state (home + store overlay in the launch's
+          working dir / RAM), concurrent instances, wiped on exit.
+          true: home.img and a writable store.img live at the VM's fixed base dir and survive
+          across boots (package cache persists); single-instance (a lock refuses a second
+          concurrent launch, since a shared rw image would corrupt). Forces homeBacking=disk.
+        '';
+      };
+
+      # ── Read-only store base ──────────────────────────────────────────────────
+      storeBacking = mkOption {
+        type    = types.enum [ "host" "image" ];
+        default = "host";
+        description = ''
+          Read-only Nix store base (shared safely across concurrent instances — it is immutable).
+          "host" shares the host /nix/store via virtiofs (no per-VM store image → faster `vm up`;
+          native on Linux; exposes the whole host store read-only). "image" builds a per-VM EROFS
+          image containing only this VM's closure (less exposure, slower rebuilds). The writable
+          store overlay is always per-instance RAM (rootfs tmpfs).
         '';
       };
 
@@ -122,14 +149,9 @@ let
     };
   };
 
-  # Resolve the "auto" home backing heuristic (tmpfs lives in guest RAM = spec.mem).
-  resolveHomeBacking = spec:
-    if spec.homeBacking != "auto" then spec.homeBacking
-    else if spec.mem > 2 * spec.homeSize then "tmpfs" else "disk";
-
-  # Baked per-VM home-backing map for the vm helper (name → tmpfs|disk)
-  vmHomeBackingStr = concatStringsSep " " (
-    mapAttrsToList (name: spec: "[${name}]=${resolveHomeBacking spec}") cfg
+  # Baked per-VM persistence map for the vm helper (name → 0|1)
+  vmPersistentStr = concatStringsSep " " (
+    mapAttrsToList (name: spec: "[${name}]=${if spec.persistent then "1" else "0"}") cfg
   );
 
   # Per-VM host launch hook dispatch (a shell `case` body). Runs the consumer-provided
@@ -173,8 +195,9 @@ in {
           # vsock port per VM name — baked in at Nix build time (Linux qemu bridge)
           declare -A VM_VSOCK_PORTS=(${vmPortsStr})
 
-          # Per-VM home backing — baked in at Nix build time
-          declare -A VM_HOME_BACKING=(${vmHomeBackingStr})
+          # Per-VM persistence (0 = ephemeral per-instance, 1 = persistent single-instance)
+          declare -A VM_PERSISTENT=(${vmPersistentStr})
+
 
           usage() {
             cat <<'EOF'
@@ -192,63 +215,69 @@ in {
 
           vm_up() {
             local name=$1
-            local state_dir="$HOME/.local/state/microvm/$name"
-            mkdir -p "$state_dir"
-
-            # Kill any stale bridge first
-            if [ -f "$state_dir/bridge.pid" ]; then
-              kill "$(cat "$state_dir/bridge.pid")" 2>/dev/null || true
-              rm -f "$state_dir/bridge.pid"
+            local base_dir="$HOME/.local/state/microvm/$name"
+            local persistent="''${VM_PERSISTENT[$name]:-0}"
+            local inst_dir
+            if [ "$persistent" = 1 ]; then
+              # Persistent: fixed base dir; home.img/store.img survive. Single-instance — refuse a
+              # second launch (a shared rw image would corrupt).
+              inst_dir="$base_dir"
+              mkdir -p "$inst_dir"
+              if [ -f "$inst_dir/instance.lock" ] && kill -0 "$(cat "$inst_dir/instance.lock" 2>/dev/null)" 2>/dev/null; then
+                echo "✗ '$name' is persistent and already running (pid $(cat "$inst_dir/instance.lock")). Not starting a second instance." >&2
+                return 1
+              fi
+            else
+              # Ephemeral: per-instance working dir. The guest's volume/socket paths are RELATIVE,
+              # so each launch runs from its own dir → concurrent instances, wiped on exit.
+              inst_dir="$base_dir/run.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
+              mkdir -p "$inst_dir"
             fi
+            cd "$inst_dir" || { echo "cannot enter $inst_dir" >&2; return 1; }
+            [ "$persistent" = 1 ] && echo $$ > "$inst_dir/instance.lock"
 
-            # Non-persistent /home in disk mode: microvm.volume autoCreate makes a fresh home.img on
-            # each start; we wipe it on exit (trap below) so /home never persists across boots.
-            # (A per-launch random image can't be used on vfkit — its runner discards runtime device
-            # args — so the path is fixed and concurrent same-VM instances are not supported.)
-            local home_img=""
-            if [ "''${VM_HOME_BACKING[$name]:-tmpfs}" = disk ]; then
-              home_img="$state_dir/home.img"
-            fi
-
-            # Generic cleanup trap: kill every helper that registered a PID under the VM state
-            # dir and remove its sockets, plus the ephemeral home image. Consumer hooks
-            # (hostPreLaunch) plug into this by writing "$state_dir/<x>.pid" / "<x>.sock".
-            # The VALUE of state_dir / home_img is baked in now so it survives vm_up returning.
+            # Cleanup trap: kill helper PIDs, drop transient sockets/pids/lock; wipe the whole dir
+            # only when ephemeral (persistent keeps home.img/store.img). Values baked in now so the
+            # trap stays valid after vm_up returns.
             trap '
-              for pf in "'"$state_dir"'"/*.pid; do
+              for pf in "'"$inst_dir"'"/*.pid; do
                 [ -e "$pf" ] || continue
                 kill "$(cat "$pf")" 2>/dev/null || true
-                rm -f "$pf"
               done
-              rm -f "'"$state_dir"'"/*.sock
-              [ -n "'"$home_img"'" ] && rm -f "'"$home_img"'"
+              rm -f "'"$inst_dir"'"/*.pid "'"$inst_dir"'"/*.sock "'"$inst_dir"'"/instance.lock
+              [ "'"$persistent"'" = 1 ] || rm -rf "'"$inst_dir"'"
             ' EXIT INT TERM
 
             if [ -n "''${SSH_AUTH_SOCK:-}" ]; then
               if [ "$OS" = "Darwin" ]; then
-                # macOS/vfkit: socat unix bridge → vfkit forwards it into the guest as vsock
-                rm -f "$state_dir/agent.sock"
-                socat UNIX-LISTEN:"$state_dir/agent.sock",fork,mode=0600 \
+                # vfkit resolves the guest's relative socketURL (agent.sock) against $inst_dir
+                socat UNIX-LISTEN:"$inst_dir/agent.sock",fork,mode=0600 \
                       UNIX-CONNECT:"$SSH_AUTH_SOCK" &
               else
-                # Linux/qemu: socat listens directly on vsock; guest connects to host CID 2:port
+                # Linux/qemu: socat listens on the vsock port. NOTE: the port/CID is baked per VM,
+                # so concurrent instances of the SAME VM collide here on qemu (a vfkit-only feature).
                 local port="''${VM_VSOCK_PORTS[$name]:?'Unknown VM: use vm list'}"
                 socat VSOCK-LISTEN:"$port",reuseaddr,fork \
                       UNIX-CONNECT:"$SSH_AUTH_SOCK" &
               fi
-              echo $! > "$state_dir/bridge.pid"
-              echo "→ Agent bridge started (pid $(cat "$state_dir/bridge.pid"))"
+              echo $! > "$inst_dir/bridge.pid"
+              echo "→ Agent bridge started (pid $!)"
             else
               echo "⚠  SSH_AUTH_SOCK not set — agent forwarding disabled"
             fi
 
-            # Consumer host hook: mechanism-agnostic escape hatch (credential agents, RAM-disk
-            # mounts, …). Runs with $name, $state_dir, $OS, $MICROVM_HOME_IMG in scope.
+            # Consumer host hook (credential staging, RAM-disk mounts, …). Runs with CWD = the
+            # per-instance dir; in scope: $name, $inst_dir, $OS. Background helpers should write
+            # "$inst_dir/<x>.pid" so the trap kills them.
             case "$name" in
             ${hostPreLaunchDispatch}
             esac
 
-            echo "→ Launching VM '$name'… (poweroff inside to stop)"
+            if [ "$persistent" = 1 ]; then
+              echo "→ Launching persistent VM '$name'… (poweroff inside to stop)"
+            else
+              echo "→ Launching VM '$name' (instance ''${inst_dir##*/})… (poweroff inside to stop)"
+            fi
             nix run "$FLAKE#microvm-$name"
           }
 
