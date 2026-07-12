@@ -133,14 +133,14 @@ in {
   # ── Packages: minimal base only. socat is required (SSH-agent bridge); the rest are small,
   #    universal CLI tools. Everything else (gh, editors, language toolchains, AI CLIs, …) is
   #    consumer-specific — add it per VM via extraModules / extraHmModules.
-  environment.systemPackages = with pkgs; [
+  environment.systemPackages = (with pkgs; [
     socat        # required: SSH-agent vsock bridge
     git
     curl
     jq
     ripgrep
     fzf
-  ];
+  ]) ++ vmSpec.extraPackages pkgs;   # consumer additions, resolved against the guest's pkgs
 
   # ── Nix settings
   nix.package = pkgs.nix;
@@ -209,7 +209,7 @@ in {
   # ── Clock resync after host sleep (chrony's makestep jumps immediately when offset > 1 s)
   services.chrony = {
     enable      = true;
-    servers     = [ "pool.ntp.org" ];
+    servers     = vmSpec.ntpServers;
     extraConfig = "makestep 1 -1";
   };
 

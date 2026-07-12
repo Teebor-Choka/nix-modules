@@ -23,7 +23,7 @@ per VM via `extraModules`, `overlays`, `hostPreLaunch`, etc. — the module impo
 
 These modules are input-free; the consuming flake passes its own inputs via `specialArgs`:
 
-- `nixModules.microvms` (host module) — declares the `custom.microvms` options + the `vm` helper.
+- `nixosModules.microvms` (host module) — declares the `custom.microvms` options + the `vm` helper.
 - `nixosModules.microvmGuest` (guest module) — instantiated per VM as:
   ```nix
   nixpkgs.lib.nixosSystem {
@@ -94,7 +94,9 @@ Per-instance (ephemeral): `~/.local/state/microvm/<name>/run.<pid>.<rand>/` hold
 | `mac` | *(derived)* | Guest NIC MAC (auto from name) |
 | `overlays` | `[]` | nixpkgs overlays applied in the guest |
 | `allowUnfree` | `false` | `allowUnfree` inside the guest |
+| `extraPackages` | `_: []` | Extra guest packages as `pkgs: [ pkgs.foo ]` |
 | `nameservers` | `["1.1.1.1" "8.8.8.8"]` | Guest DNS |
+| `ntpServers` | `["pool.ntp.org"]` | chrony NTP servers |
 | `substituters` | *(cache.nixos.org + nix-community)* | Guest binary caches |
 | `trustedPublicKeys` | *(matching keys)* | Guest cache public keys |
 | `hmModules` | `[home-manager/home.nix]` | Base home-manager modules |

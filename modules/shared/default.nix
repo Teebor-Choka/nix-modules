@@ -1,7 +1,7 @@
 # modules/shared/default.nix
 # Cross-platform configuration shared by darwin and nixos hosts.
 # Only options that exist (with the same name) on both nix-darwin and NixOS live here.
-{ config, pkgs, inputs, ... }: {
+{ config, pkgs, lib, ... }: {
   # nixpkgs: consumer-provided overlays + unfree policy (both default to none/false).
   nixpkgs.overlays = config.custom.overlays;
   nixpkgs.config.allowUnfree = config.custom.allowUnfree;
@@ -11,20 +11,20 @@
     enable = true;
     enableCompletion = true;
     shellInit = ''
-      eval "$(direnv hook zsh)"
+      ${lib.optionalString config.custom.enableDirenv ''eval "$(direnv hook zsh)"''}
       export PATH=$HOME/.local/bin:$PATH
     '';
   };
   programs.bash.enable = true;
 
-  # Dev ergonomics
-  programs.direnv.enable = true;
-  programs.direnv.nix-direnv.enable = true;
-  programs.gnupg.agent.enable = true;
+  # Dev ergonomics (all opt-out via custom.* with backwards-compatible defaults)
+  programs.direnv.enable = config.custom.enableDirenv;
+  programs.direnv.nix-direnv.enable = config.custom.enableDirenv;
+  programs.gnupg.agent.enable = config.custom.enableGnupgAgent;
   programs.gnupg.agent.enableSSHSupport = false;
 
-  environment.variables.EDITOR = "vim";
-  environment.shellAliases.sudo = "sudo ";
+  environment.variables.EDITOR = config.custom.editor;
+  environment.shellAliases = config.custom.shellAliases;
 
   fonts.packages = config.custom.fonts;
 

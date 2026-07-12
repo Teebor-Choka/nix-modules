@@ -133,6 +133,10 @@ Declared in `modules/options.nix` and `modules/microvms/default.nix`.
 | `custom.nativeNix` | `bool` | `false` | Enable Nix daemon tuning, GC, remote builder |
 | `custom.overlays` | `[overlay]` | `[]` | nixpkgs overlays applied on the host; guests take `overlays` per VM |
 | `custom.allowUnfree` | `bool` | `false` | `allowUnfree` on the host; guests take `allowUnfree` per VM |
+| `custom.editor` | `str` | `"vim"` | Default `$EDITOR` (shared base) |
+| `custom.shellAliases` | `{str→str}` | `{sudo="sudo ";}` | System shell aliases (shared base) |
+| `custom.enableDirenv` | `bool` | `true` | direnv + nix-direnv + zsh hook |
+| `custom.enableGnupgAgent` | `bool` | `true` | GnuPG agent |
 | `custom.flakeDir` | `str` | `~/…/.config/nix` | Absolute path to your host flake (for `rebuild-me` and VM helpers) |
 | `custom.homebrew.taps` | `[str]` | `[]` | Homebrew taps (darwin) |
 | `custom.homebrew.brews` | `[str]` | `[]` | Homebrew formulae |

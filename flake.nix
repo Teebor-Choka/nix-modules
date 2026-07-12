@@ -51,7 +51,8 @@
       sshConfig = ""; sshPubKeys = {}; forwardSshAgent = true; vsockPort = 9999; extraShares = [];
       vfkitExtraArgs = []; extraModules = []; homeBacking = "auto";
       persistent = false; storeBacking = "host";
-      overlays = []; allowUnfree = false;
+      overlays = []; allowUnfree = false; extraPackages = _: [];
+      ntpServers = [ "pool.ntp.org" ];
       nameservers = [ "1.1.1.1" "8.8.8.8" ];
       substituters = [ "https://cache.nixos.org/" ];
       trustedPublicKeys = [ "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=" ];

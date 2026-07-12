@@ -67,6 +67,13 @@ let
         description = "nixpkgs overlays applied inside this guest (e.g. a plugins overlay). Empty by default.";
       };
       allowUnfree     = mkOption { type = types.bool; default = false; description = "allowUnfree inside this guest."; };
+      extraPackages   = mkOption {
+        type = types.functionTo (types.listOf types.package);
+        default = _: [];
+        description = "Extra guest system packages, as a function of the guest pkgs: `pkgs: [ pkgs.foo ]`.";
+        example = literalExpression "pkgs: [ pkgs.gh pkgs.htop ]";
+      };
+      ntpServers      = mkOption { type = types.listOf types.str; default = [ "pool.ntp.org" ]; description = "chrony NTP servers."; };
       nameservers     = mkOption { type = types.listOf types.str; default = [ "1.1.1.1" "8.8.8.8" ]; };
       substituters    = mkOption {
         type = types.listOf types.str;
