@@ -30,14 +30,20 @@ let
     if vmSpec.homeBacking != "auto" then vmSpec.homeBacking
     else if vmSpec.mem > 2 * vmSpec.homeSize then "tmpfs" else "disk";
 
+  # The extraArgsScript runs on the HOST (darwin under vfkit), so it must be built with HOST
+  # packages — not the guest's aarch64-linux ones (a Linux mkfs.ext4/bash can't exec on macOS).
+  # Mirrors microvm.nix's own createVolumesScript, which uses vmHostPackages.
+  hostPkgs = if vmSpec.hypervisor == "vfkit"
+             then inputs.nixpkgs.legacyPackages.aarch64-darwin
+             else pkgs;
+
   # Runtime hook: materialize the randomly-named home image (path from $MICROVM_HOME_IMG, set by
   # the `vm` helper) and emit the hypervisor device arg on stdout. Everything else → stderr.
-  homeDiskArgsScript = pkgs.writeScript "microvm-${vmName}-home-disk-args" ''
-    #!${pkgs.runtimeShell}
+  homeDiskArgsScript = hostPkgs.writeShellScript "microvm-${vmName}-home-disk-args" ''
     img="''${MICROVM_HOME_IMG:?MICROVM_HOME_IMG unset — start via the 'vm' helper}"
     if [ ! -e "$img" ]; then
-      ${pkgs.coreutils}/bin/truncate -s ${toString vmSpec.homeSize}M "$img" 1>&2
-      ${pkgs.e2fsprogs}/bin/mkfs.ext4 -L vmhome "$img" 1>&2
+      ${hostPkgs.coreutils}/bin/truncate -s ${toString vmSpec.homeSize}M "$img" 1>&2
+      ${hostPkgs.e2fsprogs}/bin/mkfs.ext4 -L vmhome "$img" 1>&2
     fi
     ${if vmSpec.hypervisor == "vfkit"
       then ''printf -- '--device virtio-blk,path=%s' "$img"''
