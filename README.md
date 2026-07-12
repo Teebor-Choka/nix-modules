@@ -19,10 +19,10 @@ registry) live in the consuming private repository.
 | `nixosModules.gnome` | GNOME/Wayland desktop via GDM |
 | `nixosModules.microvmGuest` | Shared NixOS guest base for dev microVMs |
 | `nixosModules.builderGuest` | Minimal NixOS guest for the vfkit linux-builder |
-| `nixModules.options` | `custom.*` option declarations |
-| `nixModules.nativeNix` | Nix daemon settings (caches, GC, optimise) |
-| `nixModules.shared` | Cross-platform base (overlays, zsh, direnv, GPG, fonts, HM wiring) |
-| `nixModules.microvms` | Host-side microVM module (option schema + `vm`/`builder` helpers) |
+| `nixosModules.options` | `custom.*` option declarations |
+| `nixosModules.nativeNix` | Nix daemon settings (caches, GC, optimise) |
+| `nixosModules.shared` | Cross-platform base (overlays, zsh, direnv, GPG, fonts, HM wiring) |
+| `nixosModules.microvms` | Host-side microVM module (option schema + `vm`/`builder` helpers) |
 
 ---
 
@@ -64,10 +64,10 @@ nix-darwin.lib.darwinSystem {
   system = "aarch64-darwin";
   specialArgs = { inherit inputs; hostname = "my-mac"; };
   modules = [
-    inputs.nix-modules.nixModules.options
-    inputs.nix-modules.nixModules.nativeNix
-    inputs.nix-modules.nixModules.shared
-    inputs.nix-modules.nixModules.microvms
+    inputs.nix-modules.nixosModules.options
+    inputs.nix-modules.nixosModules.nativeNix
+    inputs.nix-modules.nixosModules.shared
+    inputs.nix-modules.nixosModules.microvms
     inputs.nix-modules.darwinModules.default
     nix-homebrew.darwinModules.nix-homebrew
     home-manager.darwinModules.home-manager
@@ -82,10 +82,10 @@ nixpkgs.lib.nixosSystem {
   system = "x86_64-linux";
   specialArgs = { inherit inputs; hostname = "my-workstation"; };
   modules = [
-    inputs.nix-modules.nixModules.options
-    inputs.nix-modules.nixModules.nativeNix
-    inputs.nix-modules.nixModules.shared
-    inputs.nix-modules.nixModules.microvms
+    inputs.nix-modules.nixosModules.options
+    inputs.nix-modules.nixosModules.nativeNix
+    inputs.nix-modules.nixosModules.shared
+    inputs.nix-modules.nixosModules.microvms
     inputs.nix-modules.nixosModules.core
     inputs.nix-modules.nixosModules.gnome
     home-manager.nixosModules.home-manager
@@ -131,6 +131,8 @@ Declared in `modules/options.nix` and `modules/microvms/default.nix`.
 | `custom.username` | `str` | *(required)* | Primary user on this host |
 | `custom.hostname` | `str` | `""` | Hostname (informational; set via `networking.hostName`) |
 | `custom.nativeNix` | `bool` | `false` | Enable Nix daemon tuning, GC, remote builder |
+| `custom.overlays` | `[overlay]` | `[]` | nixpkgs overlays applied on the host; guests take `overlays` per VM |
+| `custom.allowUnfree` | `bool` | `false` | `allowUnfree` on the host; guests take `allowUnfree` per VM |
 | `custom.flakeDir` | `str` | `~/…/.config/nix` | Absolute path to your host flake (for `rebuild-me` and VM helpers) |
 | `custom.homebrew.taps` | `[str]` | `[]` | Homebrew taps (darwin) |
 | `custom.homebrew.brews` | `[str]` | `[]` | Homebrew formulae |
@@ -226,7 +228,7 @@ builder logs     # tail console output
 
 ### Shared base
 
-Every host (darwin or NixOS) gets via `nixModules.shared`:
+Every host (darwin or NixOS) gets via `nixosModules.shared`:
 - nixneovimplugins overlay + `allowUnfree`
 - zsh (completion, direnv hook, `~/.local/bin` on PATH) + bash
 - direnv + nix-direnv

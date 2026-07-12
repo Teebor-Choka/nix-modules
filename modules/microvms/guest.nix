@@ -115,31 +115,31 @@ in {
   microvm.vmHostPackages = lib.mkIf (vmSpec.hypervisor == "vfkit")
     inputs.nixpkgs.legacyPackages.aarch64-darwin;
 
-  microvm.vfkit.extraArgs = lib.mkIf (vmSpec.hypervisor == "vfkit") ([
-    "--device"
-    "virtio-vsock,port=${toString vmSpec.vsockPort},socketURL=${agentSock}"
-  ] ++ vmSpec.vfkitExtraArgs);
+  # SSH-agent forwarding is optional; the vsock device is only added when it's enabled.
+  microvm.vfkit.extraArgs = lib.mkIf (vmSpec.hypervisor == "vfkit") (
+    (lib.optionals vmSpec.forwardSshAgent [
+      "--device" "virtio-vsock,port=${toString vmSpec.vsockPort},socketURL=${agentSock}"
+    ]) ++ vmSpec.vfkitExtraArgs
+  );
 
   # Guest vsock CID for qemu/vhost-vsock. We reuse vsockPort as CID (≥1024, above reserved range).
-  microvm.vsock.cid = lib.mkIf (vmSpec.hypervisor == "qemu") vmSpec.vsockPort;
+  microvm.vsock.cid = lib.mkIf (vmSpec.hypervisor == "qemu" && vmSpec.forwardSshAgent) vmSpec.vsockPort;
 
   # ── Networking config inside the guest
   networking.hostName    = vmName;
   networking.useDHCP     = true;   # DHCP on all interfaces; hypervisor NAT provides connectivity
-  networking.nameservers = [ "1.1.1.1" "8.8.8.8" ];
+  networking.nameservers = vmSpec.nameservers;
 
-  # ── Packages: base toolset (project-specific tools come from each repo's nix develop)
+  # ── Packages: minimal base only. socat is required (SSH-agent bridge); the rest are small,
+  #    universal CLI tools. Everything else (gh, editors, language toolchains, AI CLIs, …) is
+  #    consumer-specific — add it per VM via extraModules / extraHmModules.
   environment.systemPackages = with pkgs; [
+    socat        # required: SSH-agent vsock bridge
     git
-    gh
-    claude-code
+    curl
+    jq
     ripgrep
     fzf
-    jq
-    socat
-    curl
-    tree
-    htop
   ];
 
   # ── Nix settings
@@ -147,19 +147,13 @@ in {
   nix.settings = {
     experimental-features = "nix-command flakes";
     trusted-users         = [ "root" vmSpec.user ];
-    substituters          = [
-      "https://cache.nixos.org/"
-      "https://nix-community.cachix.org"
-    ];
-    trusted-public-keys = [
-      "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
-      "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCUSids="
-    ];
+    substituters          = vmSpec.substituters;
+    trusted-public-keys   = vmSpec.trustedPublicKeys;
   };
 
-  # ── nixpkgs config: overlay + unfree (claude-code requires allowUnfree)
-  nixpkgs.overlays         = [ inputs.nixneovimplugins.overlays.default ];
-  nixpkgs.config.allowUnfree = true;
+  # ── nixpkgs config: consumer-provided overlays + unfree policy (default none/false).
+  nixpkgs.overlays           = vmSpec.overlays;
+  nixpkgs.config.allowUnfree = vmSpec.allowUnfree;
 
   # ── Guest user (mirrors host username)
   users.users.${vmSpec.user} = {
@@ -187,11 +181,11 @@ in {
   # ── Shell: zsh as default for the system
   programs.zsh.enable = true;
 
-  # ── KeePassXC agent bridge service
+  # ── Forwarded SSH-agent bridge (tool-agnostic: forwards the host's $SSH_AUTH_SOCK).
   #    Connects out to the host vsock listener (CID 2 = host on both vfkit and qemu vhost-vsock)
-  #    and presents the forwarded agent as a local unix socket.
-  systemd.services.keepassxc-agent = {
-    description = "KeePassXC SSH agent bridge (guest → host via virtio-vsock)";
+  #    and presents the forwarded agent as a local unix socket. Opt-out via forwardSshAgent = false.
+  systemd.services.ssh-agent-bridge = lib.mkIf vmSpec.forwardSshAgent {
+    description = "Forwarded SSH agent (guest → host over virtio-vsock)";
     wantedBy    = [ "multi-user.target" ];
     serviceConfig = {
       Type          = "simple";
@@ -203,8 +197,10 @@ in {
     };
   };
 
-  # Make SSH_AUTH_SOCK point to the forwarded agent for all login sessions
-  environment.variables.SSH_AUTH_SOCK = "/run/ssh-agent/agent.sock";
+  # Point SSH_AUTH_SOCK at the forwarded agent for all login sessions (when enabled).
+  environment.variables = lib.mkIf vmSpec.forwardSshAgent {
+    SSH_AUTH_SOCK = "/run/ssh-agent/agent.sock";
+  };
 
   # ── Timezone + locale (match the host)
   time.timeZone      = vmSpec.timeZone;
@@ -240,6 +236,11 @@ in {
   };
 
   boot.initrd.systemd.enable = true;
+
+  assertions = [{
+    assertion = !vmSpec.forwardSshAgent || vmSpec.vsockPort != null;
+    message = "microVM '${vmName}': forwardSshAgent = true requires vsockPort to be set.";
+  }];
 
   system.stateVersion = "24.05";
 }

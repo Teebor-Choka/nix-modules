@@ -20,6 +20,10 @@
     lib = nixpkgs.lib;
 
     # ── module outputs (raw paths — consumers import these) ─────────────────────
+    # All modules live under the recognized `nixosModules` / `darwinModules` / `homeManagerModules`
+    # outputs (so `nix flake check` stays warning-free). The cross-platform ones (options, nativeNix,
+    # shared, microvms) use only options common to nix-darwin and NixOS, so they import cleanly on
+    # both — the `nixosModules` label is a namespace, not a platform restriction.
     moduleOutputs = {
       homeManagerModules.default = ./home-manager/home.nix;
       darwinModules.default      = ./modules/darwin/core.nix;
@@ -28,12 +32,11 @@
         gnome        = ./modules/nixos/desktop/gnome.nix;
         microvmGuest = ./modules/microvms/guest.nix;
         builderGuest = ./modules/builder/guest.nix;
-      };
-      nixModules = {
-        options   = ./modules/options.nix;
-        nativeNix = ./modules/native-nix.nix;
-        shared    = ./modules/shared;
-        microvms  = ./modules/microvms/default.nix;
+        # Cross-platform (darwin + nixos):
+        options      = ./modules/options.nix;
+        nativeNix    = ./modules/native-nix.nix;
+        shared       = ./modules/shared;
+        microvms     = ./modules/microvms/default.nix;
       };
     };
 
@@ -45,9 +48,13 @@
       hypervisor = "qemu"; vcpu = 2; mem = 4096; homeSize = 2048; storeSize = 2048;
       user = "tester"; timeZone = "UTC"; locale = "en_US.UTF-8"; autologin = true;
       mac = "02:00:00:00:00:01"; hmModules = [ ./home-manager/home.nix ]; extraHmModules = [];
-      sshConfig = ""; sshPubKeys = {}; vsockPort = 9999; extraShares = [];
+      sshConfig = ""; sshPubKeys = {}; forwardSshAgent = true; vsockPort = 9999; extraShares = [];
       vfkitExtraArgs = []; extraModules = []; homeBacking = "auto";
       persistent = false; storeBacking = "host";
+      overlays = []; allowUnfree = false;
+      nameservers = [ "1.1.1.1" "8.8.8.8" ];
+      substituters = [ "https://cache.nixos.org/" ];
+      trustedPublicKeys = [ "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=" ];
     } // overrides;
 
     mkGuest = guestSystem: spec: nixpkgs.lib.nixosSystem {

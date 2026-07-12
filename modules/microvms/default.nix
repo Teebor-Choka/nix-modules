@@ -10,9 +10,13 @@ let
   vmNames    = attrNames cfg;
   vmNamesStr = concatStringsSep " " vmNames;
 
-  # Bake vsock port mapping for the Linux vm helper (name → port)
+  # Bake vsock port mapping for the Linux vm helper (name → port; empty when agent forwarding off)
   vmPortsStr = concatStringsSep " " (
-    mapAttrsToList (name: spec: "[${name}]=${toString spec.vsockPort}") cfg
+    mapAttrsToList (name: spec: "[${name}]=${toString (spec.vsockPort or "")}") cfg
+  );
+  # Whether the host `vm` helper should bridge the SSH agent for each VM (name → 0|1)
+  vmForwardAgentStr = concatStringsSep " " (
+    mapAttrsToList (name: spec: "[${name}]=${if spec.forwardSshAgent then "1" else "0"}") cfg
   );
 
   # Platform-derived home directory prefix for option defaults
@@ -51,11 +55,30 @@ let
         description = ''
           Base home-manager modules imported into every guest (generic, user-agnostic).
           Defaults to the shared base (home-manager/home.nix).
-          Per-user layers (scripts, dotfiles, git identity, etc.) are added via extraHmModules
-          in the per-VM config (e.g. claude.nix).
+          Per-user layers (scripts, dotfiles, git identity, etc.) are added via extraHmModules.
         '';
       };
       extraHmModules = mkOption { type = types.listOf types.path; default = []; };
+
+      # ── Guest nixpkgs / networking knobs (defaults are the generic library defaults) ──────
+      overlays        = mkOption {
+        type = types.listOf (mkOptionType { name = "nixpkgs-overlay"; check = lib.isFunction; merge = lib.mergeOneOption; });
+        default = [];
+        description = "nixpkgs overlays applied inside this guest (e.g. a plugins overlay). Empty by default.";
+      };
+      allowUnfree     = mkOption { type = types.bool; default = false; description = "allowUnfree inside this guest."; };
+      nameservers     = mkOption { type = types.listOf types.str; default = [ "1.1.1.1" "8.8.8.8" ]; };
+      substituters    = mkOption {
+        type = types.listOf types.str;
+        default = [ "https://cache.nixos.org/" "https://nix-community.cachix.org" ];
+      };
+      trustedPublicKeys = mkOption {
+        type = types.listOf types.str;
+        default = [
+          "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
+          "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCUSids="
+        ];
+      };
       sshConfig      = mkOption {
         type    = types.lines;
         default = "";
@@ -67,9 +90,15 @@ let
         description = "Public key files to place in ~/.ssh/ (filename → content)";
         example     = literalExpression ''{ "work.pub" = "ssh-ed25519 AAAA…"; }'';
       };
+      forwardSshAgent = mkOption {
+        type    = types.bool;
+        default = true;
+        description = "Forward the host's SSH agent ($SSH_AUTH_SOCK) into the guest over virtio-vsock.";
+      };
       vsockPort      = mkOption {
-        type        = types.int;
-        description = "Unique virtio-vsock port for KeePassXC agent forwarding";
+        type        = types.nullOr types.int;
+        default     = null;
+        description = "Unique virtio-vsock port for the forwarded SSH agent. Required when forwardSshAgent = true.";
       };
       extraShares    = mkOption {
         type = types.listOf (types.submodule {
@@ -198,6 +227,9 @@ in {
           # Per-VM persistence (0 = ephemeral per-instance, 1 = persistent single-instance)
           declare -A VM_PERSISTENT=(${vmPersistentStr})
 
+          # Per-VM SSH-agent forwarding (1 = bridge the host agent, 0 = skip)
+          declare -A VM_FORWARD_AGENT=(${vmForwardAgentStr})
+
 
           usage() {
             cat <<'EOF'
@@ -205,7 +237,7 @@ in {
 
           Commands:
             build <name>          Build VM guest image (run before first up, or after rebuild)
-            up    <name>          Start VM (bridges KeePassXC agent, attaches console)
+            up    <name>          Start VM (forwards the host SSH agent, attaches console)
             test  <name> [secs]   Headless smoke-test: boot to multi-user then tear down (exit 0=pass)
             down  <name>          Tear down agent bridge (poweroff inside VM to stop it)
             list                  Show defined VMs and bridge status
@@ -249,7 +281,9 @@ in {
               [ "'"$persistent"'" = 1 ] || rm -rf "'"$inst_dir"'"
             ' EXIT INT TERM
 
-            if [ -n "''${SSH_AUTH_SOCK:-}" ]; then
+            if [ "''${VM_FORWARD_AGENT[$name]:-1}" != 1 ]; then
+              :  # SSH-agent forwarding disabled for this VM (forwardSshAgent = false)
+            elif [ -n "''${SSH_AUTH_SOCK:-}" ]; then
               if [ "$OS" = "Darwin" ]; then
                 # vfkit resolves the guest's relative socketURL (agent.sock) against $inst_dir
                 socat UNIX-LISTEN:"$inst_dir/agent.sock",fork,mode=0600 \
@@ -262,7 +296,7 @@ in {
                       UNIX-CONNECT:"$SSH_AUTH_SOCK" &
               fi
               echo $! > "$inst_dir/bridge.pid"
-              echo "→ Agent bridge started (pid $!)"
+              echo "→ SSH-agent bridge started (pid $!)"
             else
               echo "⚠  SSH_AUTH_SOCK not set — agent forwarding disabled"
             fi

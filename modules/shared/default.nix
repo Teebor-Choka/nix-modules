@@ -2,9 +2,9 @@
 # Cross-platform configuration shared by darwin and nixos hosts.
 # Only options that exist (with the same name) on both nix-darwin and NixOS live here.
 { config, pkgs, inputs, ... }: {
-  # nixpkgs: nvim-plugins overlay + unfree (claude-code, etc.)
-  nixpkgs.overlays = [ inputs.nixneovimplugins.overlays.default ];
-  nixpkgs.config.allowUnfree = true;
+  # nixpkgs: consumer-provided overlays + unfree policy (both default to none/false).
+  nixpkgs.overlays = config.custom.overlays;
+  nixpkgs.config.allowUnfree = config.custom.allowUnfree;
 
   # Shells (platform-specific zsh extras live in the per-platform core modules)
   programs.zsh = {

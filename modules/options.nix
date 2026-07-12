@@ -13,6 +13,20 @@ with lib; {
       default = [];
       description = "Font packages to install system-wide";
     };
+    overlays = mkOption {
+      type = types.listOf (mkOptionType {
+        name = "nixpkgs-overlay";
+        check = lib.isFunction;
+        merge = lib.mergeOneOption;
+      });
+      default = [];
+      description = "nixpkgs overlays to apply system-wide (host + guests). Empty by default.";
+    };
+    allowUnfree = mkOption {
+      type = types.bool;
+      default = false;
+      description = "Set nixpkgs.config.allowUnfree system-wide (host + guests).";
+    };
     homebrew = {
       taps = mkOption { type = types.listOf types.str; default = []; };
       brews = mkOption { type = types.listOf types.str; default = []; };
