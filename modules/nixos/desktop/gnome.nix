@@ -16,9 +16,9 @@
 
   # Remove heavy GNOME bloat from the default package set
   environment.gnome.excludePackages = with pkgs.gnome; [
-    epiphany   # web browser
-    totem      # video player
-    yelp       # help browser
+    epiphany # web browser
+    totem # video player
+    yelp # help browser
   ];
 
   # Useful extras that GNOME doesn't include by default

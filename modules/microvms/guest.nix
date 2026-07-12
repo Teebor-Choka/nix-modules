@@ -2,32 +2,40 @@
 # Shared NixOS guest base for all microVMs.
 # Receives `vmName` (string) and `vmSpec` (evaluated custom.microvms.<name> attrset)
 # from flake.nix via specialArgs.
-{ config, pkgs, lib, inputs, vmName, vmSpec, ... }:
+{
+  config,
+  pkgs,
+  lib,
+  inputs,
+  vmName,
+  vmSpec,
+  ...
+}:
 let
   # Host-side path prefix: /Users on macOS (vfkit), /home on Linux (qemu).
   # Derived from hypervisor since vfkit→darwin, qemu→linux.
   hostHomePrefix = if vmSpec.hypervisor == "vfkit" then "/Users" else "/home";
-  hostHome       = "${hostHomePrefix}/${vmSpec.user}";
-  stateDir       = "${hostHome}/.local/state/microvm/${vmName}";
+  hostHome = "${hostHomePrefix}/${vmSpec.user}";
+  stateDir = "${hostHome}/.local/state/microvm/${vmName}";
   # Relative socket path: the `vm` helper launches each instance from its own working directory,
   # so vfkit resolves this against that per-instance dir (enables concurrent instances).
-  agentSock      = "agent.sock";               # only used by vfkit path below
+  agentSock = "agent.sock"; # only used by vfkit path below
 
   # Share the host /nix/store read-only (vs a per-VM EROFS image). Immutable → safe across
   # concurrent instances. Adding this share flips microvm.storeOnDisk to false automatically.
   shareHostStore = vmSpec.storeBacking == "host";
 
   # Nix store paths for shared pub-key files
-  sshPubKeyFiles = lib.mapAttrs' (fname: content:
-    lib.nameValuePair ".ssh/${fname}" { text = content; }
+  sshPubKeyFiles = lib.mapAttrs' (
+    fname: content: lib.nameValuePair ".ssh/${fname}" { text = content; }
   ) vmSpec.sshPubKeys;
 
   # Resolved extraShares: derive virtiofs tag from basename(mountPoint) when not set
   resolvedExtraShares = map (s: {
-    tag        = if s.tag != "" then s.tag else baseNameOf s.mountPoint;
-    source     = s.source;
+    tag = if s.tag != "" then s.tag else baseNameOf s.mountPoint;
+    source = s.source;
     mountPoint = s.mountPoint;
-    proto      = "virtiofs";
+    proto = "virtiofs";
   }) vmSpec.extraShares;
 
   # ── Non-persistent /home backing ──────────────────────────────────────────────
@@ -37,11 +45,17 @@ let
   # Non-persistence comes from the `vm` helper wiping the image on exit; microvm autoCreate then
   # remakes a blank ext4 on the next start.
   homeBackingResolved =
-    if vmSpec.persistent then "disk"           # tmpfs can't persist across boots
-    else if vmSpec.homeBacking != "auto" then vmSpec.homeBacking
-    else if vmSpec.mem > 2 * vmSpec.homeSize then "tmpfs" else "disk";
+    if vmSpec.persistent then
+      "disk" # tmpfs can't persist across boots
+    else if vmSpec.homeBacking != "auto" then
+      vmSpec.homeBacking
+    else if vmSpec.mem > 2 * vmSpec.homeSize then
+      "tmpfs"
+    else
+      "disk";
 
-in {
+in
+{
   imports = [
     inputs.home-manager.nixosModules.home-manager
   ];
@@ -52,24 +66,27 @@ in {
 
   # ── Hardware / hypervisor
   microvm.hypervisor = vmSpec.hypervisor;
-  microvm.vcpu       = vmSpec.vcpu;
-  microvm.mem        = vmSpec.mem;
+  microvm.vcpu = vmSpec.vcpu;
+  microvm.mem = vmSpec.mem;
 
   # ── Networking: usermode NAT (outbound internet; no sshd into VM)
-  microvm.interfaces = [{
-    type = "user";
-    id   = "eth0";
-    mac  = vmSpec.mac;
-  }];
+  microvm.interfaces = [
+    {
+      type = "user";
+      id = "eth0";
+      mac = vmSpec.mac;
+    }
+  ];
 
   # ── Virtiofs shares: extra per-VM shares, plus the read-only host store (host mode).
   #    The /nix/store share makes microvm.storeOnDisk=false (host store instead of an EROFS image).
-  microvm.shares = resolvedExtraShares
+  microvm.shares =
+    resolvedExtraShares
     ++ lib.optional shareHostStore {
-      source     = "/nix/store";
+      source = "/nix/store";
       mountPoint = "/nix/.ro-store";
-      tag        = "ro-store";
-      proto      = "virtiofs";
+      tag = "ro-store";
+      proto = "virtiofs";
     };
 
   # ── Volumes (RELATIVE image paths → resolved against the launch's working dir):
@@ -78,21 +95,24 @@ in {
   #    - disk-mode /home gets a home.img (persistent at base dir, or per-instance & wiped).
   microvm.volumes =
     lib.optional vmSpec.persistent {
-      image      = "store.img";
+      image = "store.img";
       mountPoint = "/nix/.rw-store";
-      size       = vmSpec.storeSize;
+      size = vmSpec.storeSize;
     }
     ++ lib.optional (homeBackingResolved == "disk") {
-      image      = "home.img";
+      image = "home.img";
       mountPoint = "/home";
-      size       = vmSpec.homeSize;
+      size = vmSpec.homeSize;
     };
 
   # tmpfs mode: /home is RAM-backed (no host device). disk mode mounts /home from the volume above.
   fileSystems."/home" = lib.mkIf (homeBackingResolved == "tmpfs") {
-    device  = "tmpfs";
-    fsType  = "tmpfs";
-    options = [ "mode=0755" "size=${toString vmSpec.homeSize}m" ];
+    device = "tmpfs";
+    fsType = "tmpfs";
+    options = [
+      "mode=0755"
+      "size=${toString vmSpec.homeSize}m"
+    ];
   };
 
   # ── Agent device attach — conditional per hypervisor ─────────────────────────
@@ -112,54 +132,64 @@ in {
 
   # Supply darwin host packages so the vfkit runner's isDarwin check passes.
   # Without this, vmHostPackages defaults to the guest's aarch64-linux pkgs → build error.
-  microvm.vmHostPackages = lib.mkIf (vmSpec.hypervisor == "vfkit")
-    inputs.nixpkgs.legacyPackages.aarch64-darwin;
+  microvm.vmHostPackages = lib.mkIf (
+    vmSpec.hypervisor == "vfkit"
+  ) inputs.nixpkgs.legacyPackages.aarch64-darwin;
 
   # SSH-agent forwarding is optional; the vsock device is only added when it's enabled.
   microvm.vfkit.extraArgs = lib.mkIf (vmSpec.hypervisor == "vfkit") (
     (lib.optionals vmSpec.forwardSshAgent [
-      "--device" "virtio-vsock,port=${toString vmSpec.vsockPort},socketURL=${agentSock}"
-    ]) ++ vmSpec.vfkitExtraArgs
+      "--device"
+      "virtio-vsock,port=${toString vmSpec.vsockPort},socketURL=${agentSock}"
+    ])
+    ++ vmSpec.vfkitExtraArgs
   );
 
   # Guest vsock CID for qemu/vhost-vsock. We reuse vsockPort as CID (≥1024, above reserved range).
-  microvm.vsock.cid = lib.mkIf (vmSpec.hypervisor == "qemu" && vmSpec.forwardSshAgent) vmSpec.vsockPort;
+  microvm.vsock.cid = lib.mkIf (
+    vmSpec.hypervisor == "qemu" && vmSpec.forwardSshAgent
+  ) vmSpec.vsockPort;
 
   # ── Networking config inside the guest
-  networking.hostName    = vmName;
-  networking.useDHCP     = true;   # DHCP on all interfaces; hypervisor NAT provides connectivity
+  networking.hostName = vmName;
+  networking.useDHCP = true; # DHCP on all interfaces; hypervisor NAT provides connectivity
   networking.nameservers = vmSpec.nameservers;
 
   # ── Packages: minimal base only. socat is required (SSH-agent bridge); the rest are small,
   #    universal CLI tools. Everything else (gh, editors, language toolchains, AI CLIs, …) is
   #    consumer-specific — add it per VM via extraModules / extraHmModules.
-  environment.systemPackages = (with pkgs; [
-    socat        # required: SSH-agent vsock bridge
-    git
-    curl
-    jq
-    ripgrep
-    fzf
-  ]) ++ vmSpec.extraPackages pkgs;   # consumer additions, resolved against the guest's pkgs
+  environment.systemPackages =
+    (with pkgs; [
+      socat # required: SSH-agent vsock bridge
+      git
+      curl
+      jq
+      ripgrep
+      fzf
+    ])
+    ++ vmSpec.extraPackages pkgs; # consumer additions, resolved against the guest's pkgs
 
   # ── Nix settings
   nix.package = pkgs.nix;
   nix.settings = {
     experimental-features = "nix-command flakes";
-    trusted-users         = [ "root" vmSpec.user ];
-    substituters          = vmSpec.substituters;
-    trusted-public-keys   = vmSpec.trustedPublicKeys;
+    trusted-users = [
+      "root"
+      vmSpec.user
+    ];
+    substituters = vmSpec.substituters;
+    trusted-public-keys = vmSpec.trustedPublicKeys;
   };
 
   # ── nixpkgs config: consumer-provided overlays + unfree policy (default none/false).
-  nixpkgs.overlays           = vmSpec.overlays;
+  nixpkgs.overlays = vmSpec.overlays;
   nixpkgs.config.allowUnfree = vmSpec.allowUnfree;
 
   # ── Guest user (mirrors host username)
   users.users.${vmSpec.user} = {
     isNormalUser = true;
-    shell        = pkgs.zsh;
-    extraGroups  = [ "wheel" ];
+    shell = pkgs.zsh;
+    extraGroups = [ "wheel" ];
   };
   security.sudo.wheelNeedsPassword = false;
 
@@ -186,13 +216,13 @@ in {
   #    and presents the forwarded agent as a local unix socket. Opt-out via forwardSshAgent = false.
   systemd.services.ssh-agent-bridge = lib.mkIf vmSpec.forwardSshAgent {
     description = "Forwarded SSH agent (guest → host over virtio-vsock)";
-    wantedBy    = [ "multi-user.target" ];
+    wantedBy = [ "multi-user.target" ];
     serviceConfig = {
-      Type          = "simple";
-      ExecStart     = "${pkgs.socat}/bin/socat UNIX-LISTEN:/run/ssh-agent/agent.sock,fork,mode=0666 VSOCK-CONNECT:2:${toString vmSpec.vsockPort}";
-      Restart       = "on-failure";
-      RestartSec    = "5s";
-      RuntimeDirectory     = "ssh-agent";
+      Type = "simple";
+      ExecStart = "${pkgs.socat}/bin/socat UNIX-LISTEN:/run/ssh-agent/agent.sock,fork,mode=0666 VSOCK-CONNECT:2:${toString vmSpec.vsockPort}";
+      Restart = "on-failure";
+      RestartSec = "5s";
+      RuntimeDirectory = "ssh-agent";
       RuntimeDirectoryMode = "0755";
     };
   };
@@ -203,13 +233,13 @@ in {
   };
 
   # ── Timezone + locale (match the host)
-  time.timeZone      = vmSpec.timeZone;
+  time.timeZone = vmSpec.timeZone;
   i18n.defaultLocale = vmSpec.locale;
 
   # ── Clock resync after host sleep (chrony's makestep jumps immediately when offset > 1 s)
   services.chrony = {
-    enable      = true;
-    servers     = vmSpec.ntpServers;
+    enable = true;
+    servers = vmSpec.ntpServers;
     extraConfig = "makestep 1 -1";
   };
 
@@ -219,8 +249,8 @@ in {
   # darwin-only bits in the user layer are guarded with lib.optionals/mkIf pkgs.stdenv.isDarwin
   # so they no-op on the aarch64-linux guest (isDarwin = false here).
   home-manager = {
-    useGlobalPkgs       = true;   # use NixOS system pkgs (aarch64-linux, with overlays applied)
-    useUserPackages     = true;
+    useGlobalPkgs = true; # use NixOS system pkgs (aarch64-linux, with overlays applied)
+    useUserPackages = true;
     backupFileExtension = "backup";
     users.${vmSpec.user} = {
       imports = vmSpec.hmModules ++ vmSpec.extraHmModules;
@@ -237,10 +267,12 @@ in {
 
   boot.initrd.systemd.enable = true;
 
-  assertions = [{
-    assertion = !vmSpec.forwardSshAgent || vmSpec.vsockPort != null;
-    message = "microVM '${vmName}': forwardSshAgent = true requires vsockPort to be set.";
-  }];
+  assertions = [
+    {
+      assertion = !vmSpec.forwardSshAgent || vmSpec.vsockPort != null;
+      message = "microVM '${vmName}': forwardSshAgent = true requires vsockPort to be set.";
+    }
+  ];
 
   system.stateVersion = "24.05";
 }

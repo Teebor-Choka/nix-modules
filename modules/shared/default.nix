@@ -1,7 +1,13 @@
 # modules/shared/default.nix
 # Cross-platform configuration shared by darwin and nixos hosts.
 # Only options that exist (with the same name) on both nix-darwin and NixOS live here.
-{ config, pkgs, lib, ... }: {
+{
+  config,
+  pkgs,
+  lib,
+  ...
+}:
+{
   # nixpkgs: consumer-provided overlays + unfree policy (both default to none/false).
   nixpkgs.overlays = config.custom.overlays;
   nixpkgs.config.allowUnfree = config.custom.allowUnfree;
@@ -35,6 +41,6 @@
     useUserPackages = true;
     backupFileExtension = "backup";
     sharedModules = [ ../../home-manager/home.nix ];
-    users."${config.custom.username}" = {};
+    users."${config.custom.username}" = { };
   };
 }

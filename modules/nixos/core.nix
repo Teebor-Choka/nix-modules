@@ -1,7 +1,14 @@
 # modules/nixos/core.nix
 # NixOS workstation base — hardware-agnostic.
 # Each host provides its own hardware-configuration.nix via hosts/<name>/.
-{ config, pkgs, lib, hostname, ... }: {
+{
+  config,
+  pkgs,
+  lib,
+  hostname,
+  ...
+}:
+{
   # ── Boot (UEFI / systemd-boot)
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
@@ -22,11 +29,11 @@
   # ── SSH server — cattle control plane (push deploys depend on this; never disable)
   services.openssh = {
     enable = true;
-    openFirewall = lib.mkDefault true;           # port 22 reachable; anti-lockout for push deploy
+    openFirewall = lib.mkDefault true; # port 22 reachable; anti-lockout for push deploy
     settings = {
-      PasswordAuthentication       = lib.mkDefault false;  # keys only
+      PasswordAuthentication = lib.mkDefault false; # keys only
       KbdInteractiveAuthentication = lib.mkDefault false;
-      PermitRootLogin              = lib.mkDefault "no";
+      PermitRootLogin = lib.mkDefault "no";
     };
   };
 
@@ -38,7 +45,13 @@
   users.users."${config.custom.username}" = {
     isNormalUser = true;
     shell = pkgs.zsh;
-    extraGroups = [ "wheel" "audio" "video" "input" "networkmanager" ];
+    extraGroups = [
+      "wheel"
+      "audio"
+      "video"
+      "input"
+      "networkmanager"
+    ];
   };
   security.sudo.wheelNeedsPassword = true;
 

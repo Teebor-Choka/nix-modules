@@ -15,81 +15,152 @@
     nixneovimplugins.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = inputs@{ self, nixpkgs, home-manager, microvm, nixneovimplugins }:
-  let
-    lib = nixpkgs.lib;
+  outputs =
+    inputs@{
+      self,
+      nixpkgs,
+      home-manager,
+      microvm,
+      nixneovimplugins,
+    }:
+    let
+      lib = nixpkgs.lib;
 
-    # ── module outputs (raw paths — consumers import these) ─────────────────────
-    # All modules live under the recognized `nixosModules` / `darwinModules` / `homeManagerModules`
-    # outputs (so `nix flake check` stays warning-free). The cross-platform ones (options, nativeNix,
-    # shared, microvms) use only options common to nix-darwin and NixOS, so they import cleanly on
-    # both — the `nixosModules` label is a namespace, not a platform restriction.
-    moduleOutputs = {
-      homeManagerModules.default = ./home-manager/home.nix;
-      darwinModules.default      = ./modules/darwin/core.nix;
-      nixosModules = {
-        core         = ./modules/nixos/core.nix;
-        gnome        = ./modules/nixos/desktop/gnome.nix;
-        microvmGuest = ./modules/microvms/guest.nix;
-        builderGuest = ./modules/builder/guest.nix;
-        # Cross-platform (darwin + nixos):
-        options      = ./modules/options.nix;
-        nativeNix    = ./modules/native-nix.nix;
-        shared       = ./modules/shared;
-        microvms     = ./modules/microvms/default.nix;
+      # ── module outputs (raw paths — consumers import these) ─────────────────────
+      # All modules live under the recognized `nixosModules` / `darwinModules` / `homeManagerModules`
+      # outputs (so `nix flake check` stays warning-free). The cross-platform ones (options, nativeNix,
+      # shared, microvms) use only options common to nix-darwin and NixOS, so they import cleanly on
+      # both — the `nixosModules` label is a namespace, not a platform restriction.
+      moduleOutputs = {
+        homeManagerModules.default = ./home-manager/home.nix;
+        darwinModules.default = ./modules/darwin/core.nix;
+        nixosModules = {
+          core = ./modules/nixos/core.nix;
+          gnome = ./modules/nixos/desktop/gnome.nix;
+          microvmGuest = ./modules/microvms/guest.nix;
+          builderGuest = ./modules/builder/guest.nix;
+          # Cross-platform (darwin + nixos):
+          options = ./modules/options.nix;
+          nativeNix = ./modules/native-nix.nix;
+          shared = ./modules/shared;
+          microvms = ./modules/microvms/default.nix;
+        };
       };
+
+      # ── microVM guest self-check ────────────────────────────────────────────────
+      # A minimal, hand-built vmSpec (mirrors the custom.microvms.<name> submodule fields the guest
+      # reads). Instantiating the guest against it forces full evaluation of guest.nix + the runner,
+      # catching option/type/wiring regressions without a consumer flake.
+      mkSpec =
+        overrides:
+        {
+          hypervisor = "qemu";
+          vcpu = 2;
+          mem = 4096;
+          homeSize = 2048;
+          storeSize = 2048;
+          user = "tester";
+          timeZone = "UTC";
+          locale = "en_US.UTF-8";
+          autologin = true;
+          mac = "02:00:00:00:00:01";
+          hmModules = [ ./home-manager/home.nix ];
+          extraHmModules = [ ];
+          sshConfig = "";
+          sshPubKeys = { };
+          forwardSshAgent = true;
+          vsockPort = 9999;
+          extraShares = [ ];
+          vfkitExtraArgs = [ ];
+          extraModules = [ ];
+          homeBacking = "auto";
+          persistent = false;
+          storeBacking = "host";
+          overlays = [ ];
+          allowUnfree = false;
+          extraPackages = _: [ ];
+          ntpServers = [ "pool.ntp.org" ];
+          nameservers = [
+            "1.1.1.1"
+            "8.8.8.8"
+          ];
+          substituters = [ "https://cache.nixos.org/" ];
+          trustedPublicKeys = [ "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=" ];
+        }
+        // overrides;
+
+      mkGuest =
+        guestSystem: spec:
+        nixpkgs.lib.nixosSystem {
+          system = guestSystem;
+          specialArgs = {
+            inherit inputs;
+            vmName = "smoke";
+            vmSpec = spec;
+          };
+          modules = [
+            microvm.nixosModules.microvm
+            self.nixosModules.microvmGuest
+          ];
+        };
+
+      # Force both the system closure and the hypervisor runner to evaluate; discard context so the
+      # check builds on the host without building the aarch64-linux closure.
+      guestDrvs =
+        g:
+        map builtins.unsafeDiscardStringContext [
+          g.config.system.build.toplevel.drvPath
+          g.config.microvm.declaredRunner.drvPath
+        ];
+
+      # Coverage: host-store + ephemeral (default), per-VM EROFS + persistent, tmpfs home, and the
+      # vfkit runner (needs matching aarch64 guest + darwin vmHostPackages, set inside guest.nix).
+      variants = [
+        (mkGuest "aarch64-linux" (mkSpec { }))
+        (mkGuest "aarch64-linux" (mkSpec {
+          storeBacking = "image";
+          persistent = true;
+        }))
+        (mkGuest "aarch64-linux" (mkSpec {
+          homeBacking = "tmpfs";
+        }))
+        (mkGuest "aarch64-linux" (mkSpec {
+          hypervisor = "vfkit";
+        }))
+      ];
+
+      checkSystems = [
+        "aarch64-darwin"
+        "x86_64-linux"
+      ];
+      selfChecks = lib.genAttrs checkSystems (
+        hostSys:
+        let
+          pkgs = nixpkgs.legacyPackages.${hostSys};
+          drvs = lib.concatMap guestDrvs variants;
+        in
+        {
+          microvm-guest-eval = pkgs.runCommand "microvm-guest-eval" { } ''
+            printf '%s\n' ${lib.escapeShellArgs drvs} > "$out"
+          '';
+        }
+      );
+    in
+    moduleOutputs
+    // {
+      checks = selfChecks;
+      # `nix fmt` — format all .nix files (nixfmt itself doesn't recurse; wrap it with find).
+      formatter = lib.genAttrs checkSystems (
+        s:
+        let
+          pkgs = nixpkgs.legacyPackages.${s};
+        in
+        pkgs.writeShellScriptBin "fmt" ''
+          set -eu
+          [ "$#" -eq 0 ] && set -- .
+          ${pkgs.findutils}/bin/find "$@" -name '*.nix' -not -path '*/.git/*' \
+            -exec ${pkgs.nixfmt}/bin/nixfmt {} +
+        ''
+      );
     };
-
-    # ── microVM guest self-check ────────────────────────────────────────────────
-    # A minimal, hand-built vmSpec (mirrors the custom.microvms.<name> submodule fields the guest
-    # reads). Instantiating the guest against it forces full evaluation of guest.nix + the runner,
-    # catching option/type/wiring regressions without a consumer flake.
-    mkSpec = overrides: {
-      hypervisor = "qemu"; vcpu = 2; mem = 4096; homeSize = 2048; storeSize = 2048;
-      user = "tester"; timeZone = "UTC"; locale = "en_US.UTF-8"; autologin = true;
-      mac = "02:00:00:00:00:01"; hmModules = [ ./home-manager/home.nix ]; extraHmModules = [];
-      sshConfig = ""; sshPubKeys = {}; forwardSshAgent = true; vsockPort = 9999; extraShares = [];
-      vfkitExtraArgs = []; extraModules = []; homeBacking = "auto";
-      persistent = false; storeBacking = "host";
-      overlays = []; allowUnfree = false; extraPackages = _: [];
-      ntpServers = [ "pool.ntp.org" ];
-      nameservers = [ "1.1.1.1" "8.8.8.8" ];
-      substituters = [ "https://cache.nixos.org/" ];
-      trustedPublicKeys = [ "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=" ];
-    } // overrides;
-
-    mkGuest = guestSystem: spec: nixpkgs.lib.nixosSystem {
-      system = guestSystem;
-      specialArgs = { inherit inputs; vmName = "smoke"; vmSpec = spec; };
-      modules = [ microvm.nixosModules.microvm self.nixosModules.microvmGuest ];
-    };
-
-    # Force both the system closure and the hypervisor runner to evaluate; discard context so the
-    # check builds on the host without building the aarch64-linux closure.
-    guestDrvs = g: map builtins.unsafeDiscardStringContext [
-      g.config.system.build.toplevel.drvPath
-      g.config.microvm.declaredRunner.drvPath
-    ];
-
-    # Coverage: host-store + ephemeral (default), per-VM EROFS + persistent, tmpfs home, and the
-    # vfkit runner (needs matching aarch64 guest + darwin vmHostPackages, set inside guest.nix).
-    variants = [
-      (mkGuest "aarch64-linux" (mkSpec {}))
-      (mkGuest "aarch64-linux" (mkSpec { storeBacking = "image"; persistent = true; }))
-      (mkGuest "aarch64-linux" (mkSpec { homeBacking = "tmpfs"; }))
-      (mkGuest "aarch64-linux" (mkSpec { hypervisor = "vfkit"; }))
-    ];
-
-    checkSystems = [ "aarch64-darwin" "x86_64-linux" ];
-    selfChecks = lib.genAttrs checkSystems (hostSys:
-      let
-        pkgs = nixpkgs.legacyPackages.${hostSys};
-        drvs = lib.concatMap guestDrvs variants;
-      in {
-        microvm-guest-eval = pkgs.runCommand "microvm-guest-eval" { } ''
-          printf '%s\n' ${lib.escapeShellArgs drvs} > "$out"
-        '';
-      });
-  in
-  moduleOutputs // { checks = selfChecks; };
 }
