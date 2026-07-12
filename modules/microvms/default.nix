@@ -204,10 +204,11 @@ in {
           Usage: nix-vm <command> [name]  (alias: vm)
 
           Commands:
-            build <name>   Build VM guest image (run before first up, or after rebuild)
-            up    <name>   Start VM (bridges KeePassXC agent, attaches console)
-            down  <name>   Tear down agent bridge (poweroff inside VM to stop it)
-            list           Show defined VMs and bridge status
+            build <name>          Build VM guest image (run before first up, or after rebuild)
+            up    <name>          Start VM (bridges KeePassXC agent, attaches console)
+            test  <name> [secs]   Headless smoke-test: boot to multi-user then tear down (exit 0=pass)
+            down  <name>          Tear down agent bridge (poweroff inside VM to stop it)
+            list                  Show defined VMs and bridge status
           EOF
             echo ""
             echo "Defined VMs: $DEFINED_VMS"
@@ -288,6 +289,35 @@ in {
             echo "✓ Done"
           }
 
+          # Scripted boot smoke-test: build+boot the VM headlessly and assert it reaches multi-user,
+          # then tear it down. Exit 0 = pass. vfkit's serial console needs a TTY, so we drive `vm up`
+          # through a pseudo-terminal. Requires the linux-builder for a fresh guest build.
+          vm_test() {
+            local name="''${1:?Usage: vm test <name> [timeout_s]}"
+            local timeout="''${2:-360}"
+            command -v python3 >/dev/null 2>&1 || { echo "✗ vm test needs python3 (for a PTY console)" >&2; return 2; }
+            local log; log=$(mktemp -t "vm-test-$name.XXXXXX")
+            echo "→ Smoke-testing '$name' (timeout ''${timeout}s)…  log: $log"
+            python3 -c 'import pty,sys; pty.spawn([sys.argv[1],"up",sys.argv[2]])' "$0" "$name" >"$log" 2>&1 &
+            local boot_pid=$! rc=2 waited=0
+            while kill -0 "$boot_pid" 2>/dev/null; do
+              if grep -qaE "Reached target .*Multi-User|$name login:" "$log"; then rc=0; break; fi
+              if grep -qaiE 'operation not supported by device|Emergency Mode|Dependency failed for|Timed out waiting for device|Kernel panic|cannot build|build of .* failed' "$log"; then rc=1; break; fi
+              [ "$waited" -ge "$timeout" ] && { rc=3; break; }
+              sleep 3; waited=$((waited+3))
+            done
+            # Tear down: SIGTERM vfkit → nix run returns → vm_up's trap wipes the instance dir.
+            pkill -TERM -f "microvm@$name" 2>/dev/null || true
+            sleep 2; kill "$boot_pid" 2>/dev/null || true
+            case "$rc" in
+              0) echo "✓ PASS: '$name' reached multi-user in ''${waited}s"; rm -f "$log" ;;
+              1) echo "✗ FAIL: '$name' boot error (log: $log):"; grep -aiE 'not supported|Emergency|Dependency failed|Timed out|panic|cannot build|failed' "$log" | tail -3 | sed 's/^/    /' ;;
+              3) echo "✗ FAIL: '$name' timed out after ''${timeout}s (log: $log)" ;;
+              *) echo "✗ FAIL: '$name' exited before boot (log: $log):"; tail -3 "$log" | sed 's/^/    /' ;;
+            esac
+            return "$rc"
+          }
+
           vm_down() {
             local name=$1
             local state_dir="$HOME/.local/state/microvm/$name"
@@ -317,6 +347,7 @@ in {
           case "''${1:-}" in
             build)        vm_build "''${2:?'Usage: vm build <name>'}"; ;;
             up)           vm_up   "''${2:?'Usage: vm up <name>'}"; ;;
+            test)         vm_test "''${2:?'Usage: vm test <name> [timeout_s]'}" "''${3:-}"; ;;
             down)         vm_down "''${2:?'Usage: vm down <name>'}"; ;;
             list)         vm_list; ;;
             ""|--help|-h) usage; ;;
