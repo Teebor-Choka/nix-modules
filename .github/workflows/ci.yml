@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flake-check:
+    name: nix flake check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu → checks.x86_64-linux ; macos-14 (arm64) → checks.aarch64-darwin.
+        # Both instantiate the same aarch64-linux guest variants (eval only — no closure build,
+        # so no linux-builder / KVM needed). Drop macos-14 if you don't need the darwin path.
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix (flakes enabled)
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: nix flake check
+        run: nix flake check --print-build-logs
