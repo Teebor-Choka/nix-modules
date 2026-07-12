@@ -26,29 +26,13 @@ let
 
   # ── Non-persistent /home backing ──────────────────────────────────────────────
   # tmpfs lives in guest RAM (vmSpec.mem); only sensible when RAM comfortably exceeds home size.
+  # "disk" uses a real microvm.volume (a static device the runner lists directly — vfkit's runner
+  # discards runtime-appended device args, so a per-launch random image cannot be attached there).
+  # Non-persistence comes from the `vm` helper wiping the image on exit; microvm autoCreate then
+  # remakes a blank ext4 on the next start.
   homeBackingResolved =
     if vmSpec.homeBacking != "auto" then vmSpec.homeBacking
     else if vmSpec.mem > 2 * vmSpec.homeSize then "tmpfs" else "disk";
-
-  # The extraArgsScript runs on the HOST (darwin under vfkit), so it must be built with HOST
-  # packages — not the guest's aarch64-linux ones (a Linux mkfs.ext4/bash can't exec on macOS).
-  # Mirrors microvm.nix's own createVolumesScript, which uses vmHostPackages.
-  hostPkgs = if vmSpec.hypervisor == "vfkit"
-             then inputs.nixpkgs.legacyPackages.aarch64-darwin
-             else pkgs;
-
-  # Runtime hook: materialize the randomly-named home image (path from $MICROVM_HOME_IMG, set by
-  # the `vm` helper) and emit the hypervisor device arg on stdout. Everything else → stderr.
-  homeDiskArgsScript = hostPkgs.writeShellScript "microvm-${vmName}-home-disk-args" ''
-    img="''${MICROVM_HOME_IMG:?MICROVM_HOME_IMG unset — start via the 'vm' helper}"
-    if [ ! -e "$img" ]; then
-      ${hostPkgs.coreutils}/bin/truncate -s ${toString vmSpec.homeSize}M "$img" 1>&2
-      ${hostPkgs.e2fsprogs}/bin/mkfs.ext4 -L vmhome "$img" 1>&2
-    fi
-    ${if vmSpec.hypervisor == "vfkit"
-      then ''printf -- '--device virtio-blk,path=%s' "$img"''
-      else ''printf -- '-drive id=vmhome,file=%s,format=raw,if=virtio' "$img"''}
-  '';
 
 in {
   imports = [
@@ -74,31 +58,27 @@ in {
   #    consumer's concern — add more via extraShares or an extraModules NixOS module)
   microvm.shares = resolvedExtraShares;
 
-  # ── Persistent store overlay volume only; /home is non-persistent (see below)
+  # ── Volumes: persistent store overlay + (disk mode) a non-persistent /home image.
+  #    The home.img volume is wiped on exit by the `vm` helper and recreated blank by
+  #    microvm autoCreate on the next start, so /home never persists across boots.
   microvm.volumes = [
     {
       image      = "${stateDir}/store.img";
       mountPoint = "/nix/.rw-store";
       size       = vmSpec.storeSize;
     }
-  ];
+  ] ++ lib.optional (homeBackingResolved == "disk") {
+    image      = "${stateDir}/home.img";
+    mountPoint = "/home";
+    size       = vmSpec.homeSize;
+  };
 
-  # ── Non-persistent /home: tmpfs (RAM) or randomly-named disk image wiped on exit
-  fileSystems."/home" =
-    if homeBackingResolved == "tmpfs"
-    then {
-      device  = "tmpfs";
-      fsType  = "tmpfs";
-      options = [ "mode=0755" "size=${toString vmSpec.homeSize}m" ];
-    }
-    else {
-      device = "/dev/disk/by-label/vmhome";
-      fsType = "ext4";
-    };
-
-  # Disk mode: attach the runtime-random home image via the runner's extraArgsScript hook.
-  microvm.extraArgsScript =
-    lib.mkIf (homeBackingResolved == "disk") "${homeDiskArgsScript}";
+  # tmpfs mode: /home is RAM-backed (no host device). disk mode mounts /home from the volume above.
+  fileSystems."/home" = lib.mkIf (homeBackingResolved == "tmpfs") {
+    device  = "tmpfs";
+    fsType  = "tmpfs";
+    options = [ "mode=0755" "size=${toString vmSpec.homeSize}m" ];
+  };
 
   # ── Agent device attach — conditional per hypervisor ─────────────────────────
   #

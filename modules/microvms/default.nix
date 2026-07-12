@@ -201,13 +201,13 @@ in {
               rm -f "$state_dir/bridge.pid"
             fi
 
-            # Non-persistent /home in disk mode: a randomly-named ext4 image, materialized by the
-            # guest extraArgsScript from $MICROVM_HOME_IMG, wiped on exit. The random name allows
-            # multiple instances of the same VM to run concurrently without image collision.
+            # Non-persistent /home in disk mode: microvm.volume autoCreate makes a fresh home.img on
+            # each start; we wipe it on exit (trap below) so /home never persists across boots.
+            # (A per-launch random image can't be used on vfkit — its runner discards runtime device
+            # args — so the path is fixed and concurrent same-VM instances are not supported.)
             local home_img=""
             if [ "''${VM_HOME_BACKING[$name]:-tmpfs}" = disk ]; then
-              home_img="$state_dir/home.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ').img"
-              export MICROVM_HOME_IMG="$home_img"
+              home_img="$state_dir/home.img"
             fi
 
             # Generic cleanup trap: kill every helper that registered a PID under the VM state
