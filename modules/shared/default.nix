@@ -3,7 +3,6 @@
 # Only options that exist (with the same name) on both nix-darwin and NixOS live here.
 {
   config,
-  pkgs,
   lib,
   ...
 }:
