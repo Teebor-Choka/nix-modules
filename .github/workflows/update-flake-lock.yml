@@ -1,0 +1,42 @@
+name: Update flake.lock
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # every Monday 06:00 UTC, same window as Dependabot
+  workflow_dispatch:
+
+jobs:
+  update-flake-lock:
+    name: Update flake.lock
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix (flakes enabled)
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: nix flake update
+        run: nix flake update
+
+      - name: Open PR and enable auto-merge (if changed)
+        run: |
+          if git diff --exit-code flake.lock; then
+            echo "flake.lock unchanged — skipping PR"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          BRANCH="chore/flake-lock-$(date +%Y%m%d)"
+          git checkout -b "$BRANCH"
+          git add flake.lock
+          git commit -m "chore(flake): update flake.lock"
+          git push origin "$BRANCH"
+          PR_URL=$(gh pr create \
+            --title "chore(flake): update flake.lock" \
+            --body "Automated weekly \`nix flake update\`. Review the input diff, then approve to merge.")
+          gh pr merge --auto --merge "$PR_URL"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
