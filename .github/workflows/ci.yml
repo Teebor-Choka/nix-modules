@@ -12,6 +12,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  fmt-check:
+    name: nix fmt (lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix (flakes enabled)
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: nix fmt check
+        run: |
+          nix fmt
+          git diff --exit-code
+
   flake-check:
     name: nix flake check (${{ matrix.os }})
     strategy:

@@ -3,7 +3,6 @@
 # Receives `vmName` (string) and `vmSpec` (evaluated custom.microvms.<name> attrset)
 # from flake.nix via specialArgs.
 {
-  config,
   pkgs,
   lib,
   inputs,

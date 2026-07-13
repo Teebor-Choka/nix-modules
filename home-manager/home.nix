@@ -1,5 +1,5 @@
 # home-manager/home.nix
-{ config, pkgs, ... }: {
+{ pkgs, ... }: {
   imports = [ ./git-clone.nix ];
 
   home.stateVersion = "24.05";

@@ -1,7 +1,7 @@
 # modules/nixos/desktop/gnome.nix
 # GNOME Wayland desktop. Import from the host's modules list.
 # Swap for sway.nix / hyprland.nix by changing the host's modules entry.
-{ pkgs, lib, ... }: {
+{ pkgs, ... }: {
   # Display server + desktop manager
   services.xserver.enable = true;
   services.xserver.displayManager.gdm.enable = true;
