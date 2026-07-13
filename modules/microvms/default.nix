@@ -15,14 +15,14 @@ let
   vmNames = attrNames cfg;
   vmNamesStr = concatStringsSep " " vmNames;
 
+  # Bake a bash assoc-array body ("[name]=v …") for the vm helper, one entry per VM.
+  bakeMap = f: concatStringsSep " " (mapAttrsToList (name: spec: "[${name}]=${f spec}") cfg);
+
   # Bake vsock port mapping for the Linux vm helper (name → port; empty when agent forwarding off)
-  vmPortsStr = concatStringsSep " " (
-    mapAttrsToList (name: spec: "[${name}]=${toString (spec.vsockPort or "")}") cfg
-  );
+  vmPortsStr = bakeMap (spec: toString (spec.vsockPort or ""));
   # Whether the host `vm` helper should bridge the SSH agent for each VM (name → 0|1)
-  vmForwardAgentStr = concatStringsSep " " (
-    mapAttrsToList (name: spec: "[${name}]=${if spec.forwardSshAgent then "1" else "0"}") cfg
-  );
+  vmForwardAgentStr = bakeMap (spec: if spec.forwardSshAgent then "1" else "0");
+  vmPersistentStr = bakeMap (spec: if spec.persistent then "1" else "0");
 
   # Platform-derived home directory prefix for option defaults
   homePrefix = if pkgs.stdenv.isDarwin then "/Users" else "/home";
@@ -260,11 +260,6 @@ let
       };
     };
   };
-
-  # Baked per-VM persistence map for the vm helper (name → 0|1)
-  vmPersistentStr = concatStringsSep " " (
-    mapAttrsToList (name: spec: "[${name}]=${if spec.persistent then "1" else "0"}") cfg
-  );
 
   # Per-VM host launch hook dispatch (a shell `case` body). Runs the consumer-provided
   # hostPreLaunch shell for the VM being started. Multi-line, hence a case (not an assoc map).
