@@ -135,13 +135,10 @@ in
   ) inputs.nixpkgs.legacyPackages.aarch64-darwin;
 
   # SSH-agent forwarding is optional; the vsock device is only added when it's enabled.
-  # `,connect` makes vfkit relay GUEST-INITIATED vsock connections (VSOCK-CONNECT:2:port
-  # in the guest) to the host socketURL. Without it, vfkit's default `listen` mode
-  # relays HOST-initiated connections to the guest — the wrong direction for agent forwarding.
   microvm.vfkit.extraArgs = lib.mkIf (vmSpec.hypervisor == "vfkit") (
     (lib.optionals vmSpec.forwardSshAgent [
       "--device"
-      "virtio-vsock,port=${toString vmSpec.vsockPort},socketURL=${agentSock},connect"
+      "virtio-vsock,port=${toString vmSpec.vsockPort},socketURL=${agentSock}"
     ])
     ++ vmSpec.vfkitExtraArgs
   );
