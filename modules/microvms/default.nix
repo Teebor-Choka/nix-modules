@@ -380,14 +380,16 @@ in
             if [ "''${VM_FORWARD_AGENT[$name]:-1}" != 1 ]; then
               :  # SSH-agent forwarding disabled for this VM (forwardSshAgent = false)
             elif [ -n "''${SSH_AUTH_SOCK:-}" ]; then
+              local port="''${VM_VSOCK_PORTS[$name]:?'Unknown VM: use vm list'}"
               if [ "$OS" = "Darwin" ]; then
-                # vfkit resolves the guest's relative socketURL (agent.sock) against $inst_dir
-                socat UNIX-LISTEN:"$inst_dir/agent.sock",fork,mode=0600 \
+                # vfkit user-mode NAT: host is always at 192.168.65.1 from the guest's perspective.
+                # TCP relay is used instead of VSOCK because vfkit 0.6.x's virtio-vsock relay
+                # accepts guest connect() but silently drops writes (EPIPE). TCP is reliable.
+                socat TCP-LISTEN:"$port",fork,bind=192.168.65.1,reuseaddr \
                       UNIX-CONNECT:"$SSH_AUTH_SOCK" &
               else
                 # Linux/qemu: socat listens on the vsock port. NOTE: the port/CID is baked per VM,
                 # so concurrent instances of the SAME VM collide here on qemu (a vfkit-only feature).
-                local port="''${VM_VSOCK_PORTS[$name]:?'Unknown VM: use vm list'}"
                 socat VSOCK-LISTEN:"$port",reuseaddr,fork \
                       UNIX-CONNECT:"$SSH_AUTH_SOCK" &
               fi
