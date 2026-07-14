@@ -337,6 +337,13 @@ in
 
           vm_up() {
             local name=$1
+            # vfkit's virtio-serial,stdio requires a real TTY. Re-exec through a pseudo-terminal
+            # when stdin isn't one (e.g. Claude Code bash tool, CI, non-interactive scripts).
+            if [ "$OS" = "Darwin" ] && ! [ -t 0 ]; then
+              command -v python3 >/dev/null 2>&1 \
+                || { echo "✗ vm up needs python3 to allocate a PTY (vfkit requires a TTY for the serial console)" >&2; return 2; }
+              exec python3 -c 'import pty,sys; pty.spawn(sys.argv[1:])' "$0" up "$name"
+            fi
             local base_dir="$HOME/.local/state/microvm/$name"
             local persistent="''${VM_PERSISTENT[$name]:-0}"
             local inst_dir
