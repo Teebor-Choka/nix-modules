@@ -331,6 +331,9 @@ in
             test  <name> [secs]   Headless smoke-test: boot to multi-user then tear down (exit 0=pass)
             down  <name>          Stop the shared SSH-agent bridge for a VM
             list                  Show defined VMs and bridge status
+            doctor [--watch [s]] [name…]
+                                  Verify + self-heal the SSH-agent bridge of running VM(s)
+            builder <cmd>         Manage the vfkit linux-builder (macOS): up|down|status|logs
           EOF
             echo ""
             echo "Defined VMs: $DEFINED_VMS"
@@ -481,9 +484,13 @@ in
 
           vm_build() {
             local name=''${1:?'Usage: vm build <name>'}
+            local gcroot_dir="$HOME/.local/state/microvm/gcroots"
             echo "→ Building VM '$name'…"
-            nix build "$FLAKE#microvm-$name"
-            echo "✓ Done"
+            mkdir -p "$gcroot_dir"
+            # --out-link registers a GC root: the guest closure survives `nix-collect-garbage`,
+            # so a later `vm up`/`vm run` reuses it instead of rebuilding via the linux-builder.
+            nix build "$FLAKE#microvm-$name" --out-link "$gcroot_dir/microvm-$name"
+            echo "✓ Done (pinned $gcroot_dir/microvm-$name — survives nix GC)"
           }
 
           # Scripted boot smoke-test: build+boot the VM headlessly and assert it reaches multi-user,
@@ -541,6 +548,51 @@ in
             done
           }
 
+          # Is a runner process live for this VM? (matches the per-instance/base dir in the cmdline)
+          _vm_running() { pgrep -f "microvm/$1/" >/dev/null 2>&1; }
+
+          # Is the SSH-agent relay actually LISTENING? A live pidfile is not proof — on host
+          # sleep/wake the vmnet gateway churns and socat's bound socket dies under the process.
+          # Darwin = TCP relay on the vfkit NAT gateway; qemu/vsock has no cheap probe (assume ok).
+          _bridge_bound() {
+            [ "$OS" = "Darwin" ] || return 0
+            lsof -nP -iTCP@192.168.65.1:"$1" -sTCP:LISTEN >/dev/null 2>&1
+          }
+
+          # Verify — and self-heal — the SSH-agent bridge of running VM(s). The bridge is a bare
+          # socat bound to the ephemeral vmnet gateway; a host sleep/wake cycle kills it with no
+          # restart, leaving a running VM unable to reach the host agent (git/ssh fail inside).
+          # This repairs it WITHOUT touching vfkit, so an ephemeral VM's /home is never wiped.
+          #   vm doctor                one-shot, all running VMs
+          #   vm doctor <name…>        one-shot, specific VMs
+          #   vm doctor --watch [sec]  keep verifying every <sec> (default 30) — cheap supervisor
+          vm_doctor() {
+            local watch=0 interval=30
+            if [ "''${1:-}" = --watch ]; then
+              watch=1; shift
+              if [ -n "''${1:-}" ] && printf '%s' "''${1}" | grep -qE '^[0-9]+$'; then interval=''${1}; shift; fi
+            fi
+            local targets="$*"; [ -n "$targets" ] || targets="$DEFINED_VMS"
+            while :; do
+              for name in $targets; do
+                local port="''${VM_VSOCK_PORTS[$name]:-}"
+                if [ -z "$port" ]; then echo "· $name: agent forwarding off — skip"; continue; fi
+                if ! _vm_running "$name"; then echo "· $name: not running — skip"; continue; fi
+                local base_dir="$HOME/.local/state/microvm/$name"
+                if _bridge_bound "$port"; then
+                  echo "✓ $name: bridge healthy (192.168.65.1:$port)"
+                else
+                  echo "→ $name: running but bridge down (192.168.65.1:$port) — repairing…"
+                  rm -f "$base_dir/agent-bridge.pid"
+                  rmdir "$base_dir/agent-bridge.lock" 2>/dev/null || true
+                  _ensure_agent_bridge "$name" "$base_dir"
+                fi
+              done
+              [ "$watch" = 1 ] || break
+              sleep "$interval"
+            done
+          }
+
           case "''${1:-}" in
             build) vm_build "''${2:?'Usage: vm build <name>'}"; ;;
             up)    vm_up   "''${2:?'Usage: vm up <name>'}"; ;;
@@ -548,6 +600,13 @@ in
             test)  vm_test "''${2:?'Usage: vm test <name> [timeout_s]'}" "''${3:-}"; ;;
             down)  vm_down "''${2:?'Usage: vm down <name>'}"; ;;
             list)  vm_list; ;;
+            doctor) shift; vm_doctor "$@"; ;;
+            builder)
+              shift
+              command -v nix-vm-builder >/dev/null 2>&1 \
+                || { echo "✗ 'vm builder' is macOS-only (the vfkit linux-builder)" >&2; exit 1; }
+              exec nix-vm-builder "$@"
+              ;;
             ""|--help|-h) usage; ;;
             *) echo "Unknown command: ''${1}"; echo; usage; exit 1; ;;
           esac
@@ -682,7 +741,12 @@ in
                       rm -rf "$cache_dir"
 
                       echo "→ Building vfkit runner (darwin-side only, fast)..."
-                      nix build "$FLAKE#packages.aarch64-darwin.microvm-linux-builder"
+                      # --out-link registers a GC root so `nix-collect-garbage` can't reclaim the
+                      # runner and force a full re-bootstrap on the next `builder up`.
+                      local gcroot_dir="$HOME/.local/state/microvm/gcroots"
+                      mkdir -p "$gcroot_dir"
+                      nix build "$FLAKE#packages.aarch64-darwin.microvm-linux-builder" \
+                        --out-link "$gcroot_dir/microvm-linux-builder"
 
                       echo "✓ Bootstrap complete."
                     }
@@ -751,9 +815,9 @@ in
                       status) cmd_status ;;
                       logs)   cmd_logs ;;
                       *)
-                        echo "Usage: builder <up|down|status|logs>"
+                        echo "Usage: vm builder <up|down|status|logs>   (alias: builder …)"
                         echo ""
-                        echo "First run: 'builder up' (or 'nix-vm-builder up') bootstraps automatically via Apple Container when"
+                        echo "First run: 'vm builder up' bootstraps automatically via Apple Container when"
                         echo "the aarch64-linux image is not yet in the nix store (no QEMU required)."
                         ;;
                     esac
