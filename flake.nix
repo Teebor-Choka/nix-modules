@@ -168,7 +168,12 @@
           microvm-guest-eval = pkgs.runCommand "microvm-guest-eval" { } ''
             printf '%s\n' ${lib.escapeShellArgs drvs} > "$out"
           '';
-
+        }
+        # The PTY-driven console suite and the host-eval CLI suite are Linux-only: they need a
+        # working /dev/ptmx and process tools inside the build sandbox. The GitHub macOS runner's
+        # Nix sandbox denies PTY allocation (the suite hangs there), while Linux provides it — and
+        # the console driver logic is OS-agnostic, so Linux coverage guards it fully.
+        // lib.optionalAttrs (hostSys == "x86_64-linux") {
           # Behavioral regression suite for the `vm run` console driver (echo race, teardown,
           # exit-code propagation, stdout/stderr merge, fatal-boot detection) — drives the real
           # driver against fake PTY runners, no VM needed. See tests/console-run-suite.sh.
@@ -186,8 +191,7 @@
                 bash ${./tests/console-run-suite.sh} ${./modules/microvms/vm-console-run.py}
                 touch "$out"
               '';
-        }
-        // lib.optionalAttrs (hostSys == "x86_64-linux") {
+
           # Black-box CLI dispatch tests for the `vm` helper (usage, unknown cmd, list,
           # doctor-skips-not-running, builder macOS-only gate). See tests/nix-vm-cli-suite.sh.
           vm-cli =
