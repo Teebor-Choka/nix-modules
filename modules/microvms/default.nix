@@ -364,9 +364,16 @@ in
               else
                 if [ "$OS" = "Darwin" ]; then
                   # vfkit user-mode NAT: host gateway 192.168.65.1; TCP relay (VSOCK broken in 0.6.x).
-                  # The fork option handles multiple concurrent guests sharing the same port.
-                  socat TCP-LISTEN:"$port",fork,bind=192.168.65.1,reuseaddr \
-                        UNIX-CONNECT:"$SSH_AUTH_SOCK" &
+                  # The gateway address only exists once a guest is running, so binding it at launch
+                  # time races the VM's network coming up (cold start ⇒ "Can't assign requested
+                  # address", relay dies, VM boots with no agent). Run socat in a background retry
+                  # loop: it binds as soon as the interface appears and re-establishes if the relay
+                  # later drops (e.g. host sleep/wake). `fork` serves concurrent guests on the port.
+                  ( while :; do
+                      socat TCP-LISTEN:"$port",fork,bind=192.168.65.1,reuseaddr \
+                            UNIX-CONNECT:"$SSH_AUTH_SOCK" 2>/dev/null
+                      sleep 2
+                    done ) &
                 else
                   socat VSOCK-LISTEN:"$port",reuseaddr,fork \
                         UNIX-CONNECT:"$SSH_AUTH_SOCK" &
@@ -527,7 +534,11 @@ in
             local base_dir="$HOME/.local/state/microvm/$name"
             local pid_file="$base_dir/agent-bridge.pid"
             if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file" 2>/dev/null)" 2>/dev/null; then
-              kill "$(cat "$pid_file")"
+              local bpid; bpid=$(cat "$pid_file")
+              # Kill the socat child first (while its parent — the retry loop — is still alive, so
+              # it can't be respawned), then the loop itself. Otherwise socat orphans and lingers.
+              pkill -P "$bpid" 2>/dev/null || true
+              kill "$bpid" 2>/dev/null || true
               rm -f "$pid_file"
               echo "→ Agent bridge for '$name' stopped"
             else

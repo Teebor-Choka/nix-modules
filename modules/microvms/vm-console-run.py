@@ -21,6 +21,7 @@ Design notes:
   - Teardown: SIGTERM the child pid (targets only this instance, unlike pkill), waitpid.
 """
 
+import base64
 import os
 import re
 import select
@@ -73,14 +74,20 @@ def main() -> None:
             return False
 
     def _kill_child() -> None:
-        try:
-            os.kill(child_pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            os.waitpid(child_pid, 0)
-        except ChildProcessError:
-            pass
+        # Don't rely on the guest's own `poweroff` (it may lack rights / hang) and never
+        # block indefinitely on waitpid: SIGTERM, poll briefly, then escalate to SIGKILL.
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.kill(child_pid, sig)
+            except ProcessLookupError:
+                return
+            for _ in range(30):  # up to ~3 s per signal
+                try:
+                    if os.waitpid(child_pid, os.WNOHANG)[0] != 0:
+                        return
+                except ChildProcessError:
+                    return
+                time.sleep(0.1)
 
     buf       = bytearray()
     phase     = "boot"
@@ -136,15 +143,19 @@ def main() -> None:
                     except termios.error:
                         pass
                     buf.clear()
-                    # Step 3: send the sentinel-wrapped command as a single shell line.
-                    # Using printf '%s\n' avoids echo-specific escape expansion.
-                    # The { ... } 2>&1 group captures both stdout and stderr of the command.
-                    # _vmr_rc captures bash's exit code independently of pipefail settings.
-                    _write(
+                    # Step 3: send the command. The whole sentinel-wrapped script is base64-encoded
+                    # so the line we type contains NO sentinel literals — base64's alphabet has no
+                    # '_', so the tags can never appear in the (possibly echoed) command line, only
+                    # in the decoded script's real output. This makes capture immune to the stty
+                    # -echo race above (which the VM tty can win, echoing our command back).
+                    inner = (
                         f"printf '{begin_tag}\\n';"
                         f" {{ printf '%s\\n' '{b64cmd}' | base64 -d | bash; }} 2>&1;"
-                        f" _vmr_rc=$?; printf '{end_tag}%d\\n' $_vmr_rc; poweroff\n"
+                        f" _vmr_rc=$?; printf '{end_tag}%d\\n' \"$_vmr_rc\"; poweroff\n"
                     )
+                    blob = base64.b64encode(inner.encode()).decode()
+                    _write(f"printf '%s' '{blob}' | base64 -d | bash\n")
+                    print("[vm-run] boot ready → command injected", file=sys.stderr)
                     phase    = "inject"
                     deadline = time.monotonic() + RUN_TIMEOUT
 
@@ -155,6 +166,7 @@ def main() -> None:
                     after = bytes(buf)[idx + len(begin_tag):]
                     after = after.lstrip(b"\r\n")
                     buf   = bytearray(after)
+                    print("[vm-run] begin sentinel seen → capturing", file=sys.stderr)
                     phase = "capture"
 
             # ── capture: stream output until the end sentinel ─────────────────
@@ -172,6 +184,7 @@ def main() -> None:
                     m    = re.match(rb"(\d+)", rest)
                     if m:
                         exit_code = int(m.group(1))
+                    print(f"[vm-run] end sentinel seen → exit {exit_code}", file=sys.stderr)
                     phase = "done"
                 else:
                     # Stream the safe prefix; hold back len(end_enc) bytes for partial matches
