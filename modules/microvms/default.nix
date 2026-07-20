@@ -326,97 +326,171 @@ in
 
           Commands:
             build <name>          Build VM guest image (run before first up, or after rebuild)
-            up    <name>          Start VM (forwards the host SSH agent, attaches console)
+            up    <name>          Start VM interactively (attaches console, forwards SSH agent)
+            run   <name> <cmd…>   Boot headlessly, run a command, stream output, return exit code
             test  <name> [secs]   Headless smoke-test: boot to multi-user then tear down (exit 0=pass)
-            down  <name>          Tear down agent bridge (poweroff inside VM to stop it)
+            down  <name>          Stop the shared SSH-agent bridge for a VM
             list                  Show defined VMs and bridge status
+            doctor [--watch [s]] [name…]
+                                  Verify + self-heal the SSH-agent bridge of running VM(s)
+            builder <cmd>         Manage the vfkit linux-builder (macOS): up|down|status|logs
           EOF
             echo ""
             echo "Defined VMs: $DEFINED_VMS"
           }
 
-          vm_up() {
-            local name=$1
-            # vfkit's virtio-serial,stdio requires a real TTY. Re-exec through a pseudo-terminal
-            # when stdin isn't one (e.g. Claude Code bash tool, CI, non-interactive scripts).
-            if [ "$OS" = "Darwin" ] && ! [ -t 0 ]; then
-              command -v python3 >/dev/null 2>&1 \
-                || { echo "✗ vm up needs python3 to allocate a PTY (vfkit requires a TTY for the serial console)" >&2; return 2; }
-              exec python3 -c 'import pty,sys; pty.spawn(sys.argv[1:])' "$0" up "$name"
+          # Generate a random locally-administered unicast MAC (02:xx:xx:xx:xx:xx).
+          _rand_mac() {
+            printf '02:%s' "$(od -An -N5 -tx1 /dev/urandom | tr -d ' \n' | fold -w2 | paste -sd:)"
+          }
+
+          # Ensure exactly one SSH-agent relay is running for a VM (shared across concurrent instances).
+          # Pidfile lives in the base dir so the per-instance cleanup trap never kills it.
+          _ensure_agent_bridge() {
+            local name=''${1:?} base_dir=''${2:?}
+            local port="''${VM_VSOCK_PORTS[$name]:?'Unknown VM: use vm list'}"
+            [ "''${VM_FORWARD_AGENT[$name]:-1}" = 1 ] || return 0
+            if [ -z "''${SSH_AUTH_SOCK:-}" ]; then
+              echo "⚠  SSH_AUTH_SOCK not set — agent forwarding disabled"
+              return 0
             fi
+            local pid_file="$base_dir/agent-bridge.pid"
+            local lock_dir="$base_dir/agent-bridge.lock"
+            # Atomic mkdir critical section — prevents a start race when many instances launch at once.
+            if mkdir "$lock_dir" 2>/dev/null; then
+              trap 'rmdir "'"$lock_dir"'" 2>/dev/null || true' RETURN
+              if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file" 2>/dev/null)" 2>/dev/null; then
+                echo "→ SSH-agent bridge already running (pid $(cat "$pid_file"))"
+              else
+                if [ "$OS" = "Darwin" ]; then
+                  # vfkit user-mode NAT: host gateway 192.168.65.1; TCP relay (VSOCK broken in 0.6.x).
+                  # The fork option handles multiple concurrent guests sharing the same port.
+                  socat TCP-LISTEN:"$port",fork,bind=192.168.65.1,reuseaddr \
+                        UNIX-CONNECT:"$SSH_AUTH_SOCK" &
+                else
+                  socat VSOCK-LISTEN:"$port",reuseaddr,fork \
+                        UNIX-CONNECT:"$SSH_AUTH_SOCK" &
+                fi
+                echo $! > "$pid_file"
+                echo "→ SSH-agent bridge started (pid $!)"
+              fi
+            else
+              # Another process holds the lock — wait briefly for it to finish
+              local tries=0
+              while [ -d "$lock_dir" ] && [ "$tries" -lt 20 ]; do
+                sleep 0.2; tries=$((tries+1))
+              done
+              echo "→ SSH-agent bridge: pid $(cat "$pid_file" 2>/dev/null || echo '?')"
+            fi
+          }
+
+          # Prepare a VM instance: create the per-instance working dir, install the cleanup trap,
+          # start the shared SSH-agent bridge, run the consumer hostPreLaunch hook, and copy+patch
+          # the runner script with a per-instance random MAC (ephemeral VMs only).
+          # Sets globals INST_DIR (working dir) and RUNNER (executable to launch).
+          _vm_prepare() {
+            local name=''${1:?}
             local base_dir="$HOME/.local/state/microvm/$name"
             local persistent="''${VM_PERSISTENT[$name]:-0}"
-            local inst_dir
+
             if [ "$persistent" = 1 ]; then
-              # Persistent: fixed base dir; home.img/store.img survive. Single-instance — refuse a
-              # second launch (a shared rw image would corrupt).
-              inst_dir="$base_dir"
-              mkdir -p "$inst_dir"
-              if [ -f "$inst_dir/instance.lock" ] && kill -0 "$(cat "$inst_dir/instance.lock" 2>/dev/null)" 2>/dev/null; then
-                echo "✗ '$name' is persistent and already running (pid $(cat "$inst_dir/instance.lock")). Not starting a second instance." >&2
+              # Persistent: fixed base dir; home.img/store.img survive. Single-instance only.
+              INST_DIR="$base_dir"
+              mkdir -p "$INST_DIR"
+              if [ -f "$INST_DIR/instance.lock" ] && kill -0 "$(cat "$INST_DIR/instance.lock" 2>/dev/null)" 2>/dev/null; then
+                echo "✗ '$name' is persistent and already running (pid $(cat "$INST_DIR/instance.lock")). Not starting a second instance." >&2
                 return 1
               fi
             else
               # Ephemeral: per-instance working dir. The guest's volume/socket paths are RELATIVE,
               # so each launch runs from its own dir → concurrent instances, wiped on exit.
-              inst_dir="$base_dir/run.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
-              mkdir -p "$inst_dir"
+              INST_DIR="$base_dir/run.$$.$(od -An -N4 -tx4 /dev/urandom | tr -d ' ')"
+              mkdir -p "$INST_DIR"
             fi
-            cd "$inst_dir" || { echo "cannot enter $inst_dir" >&2; return 1; }
-            [ "$persistent" = 1 ] && echo $$ > "$inst_dir/instance.lock"
 
-            # Cleanup trap: kill helper PIDs, drop transient sockets/pids/lock; wipe the whole dir
-            # only when ephemeral (persistent keeps home.img/store.img). Values baked in now so the
-            # trap stays valid after vm_up returns.
+            cd "$INST_DIR" || { echo "cannot enter $INST_DIR" >&2; return 1; }
+            [ "$persistent" = 1 ] && echo $$ > "$INST_DIR/instance.lock"
+
+            # Cleanup trap: remove per-instance transient files; wipe the whole dir if ephemeral.
+            # Bakes current values so the trap stays valid after _vm_prepare returns.
             trap '
-              for pf in "'"$inst_dir"'"/*.pid; do
+              for pf in "'"$INST_DIR"'"/*.pid; do
                 [ -e "$pf" ] || continue
                 kill "$(cat "$pf")" 2>/dev/null || true
               done
-              rm -f "'"$inst_dir"'"/*.pid "'"$inst_dir"'"/*.sock "'"$inst_dir"'"/instance.lock
-              [ "'"$persistent"'" = 1 ] || rm -rf "'"$inst_dir"'"
+              rm -f "'"$INST_DIR"'"/*.pid "'"$INST_DIR"'"/*.sock "'"$INST_DIR"'"/instance.lock
+              [ "'"$persistent"'" = 1 ] || rm -rf "'"$INST_DIR"'"
             ' EXIT INT TERM
 
-            if [ "''${VM_FORWARD_AGENT[$name]:-1}" != 1 ]; then
-              :  # SSH-agent forwarding disabled for this VM (forwardSshAgent = false)
-            elif [ -n "''${SSH_AUTH_SOCK:-}" ]; then
-              if [ "$OS" = "Darwin" ]; then
-                # vfkit resolves the guest's relative socketURL (agent.sock) against $inst_dir
-                socat UNIX-LISTEN:"$inst_dir/agent.sock",fork,mode=0600 \
-                      UNIX-CONNECT:"$SSH_AUTH_SOCK" &
-              else
-                # Linux/qemu: socat listens on the vsock port. NOTE: the port/CID is baked per VM,
-                # so concurrent instances of the SAME VM collide here on qemu (a vfkit-only feature).
-                local port="''${VM_VSOCK_PORTS[$name]:?'Unknown VM: use vm list'}"
-                socat VSOCK-LISTEN:"$port",reuseaddr,fork \
-                      UNIX-CONNECT:"$SSH_AUTH_SOCK" &
-              fi
-              echo $! > "$inst_dir/bridge.pid"
-              echo "→ SSH-agent bridge started (pid $!)"
-            else
-              echo "⚠  SSH_AUTH_SOCK not set — agent forwarding disabled"
-            fi
+            mkdir -p "$base_dir"
+            _ensure_agent_bridge "$name" "$base_dir"
 
-            # Consumer host hook (credential staging, RAM-disk mounts, …). Runs with CWD = the
-            # per-instance dir; in scope: $name, $inst_dir, $OS. Background helpers should write
-            # "$inst_dir/<x>.pid" so the trap kills them.
+            # Consumer host hook (credential staging, etc.); runs with CWD = INST_DIR and $name set.
             case "$name" in
             ${hostPreLaunchDispatch}
             esac
 
-            if [ "$persistent" = 1 ]; then
+            # Build (or use cached) runner, copy to instance dir to make it writable for patching.
+            local runner_pkg
+            runner_pkg=$(nix build --no-link --print-out-paths "$FLAKE#microvm-$name")
+            cp -L "$runner_pkg/bin/microvm-run" "$INST_DIR/microvm-run"
+            chmod u+wx "$INST_DIR/microvm-run"  # cp -L preserves nix store 0500; need +w to allow mv to overwrite
+
+            if [ "$persistent" != 1 ]; then
+              # Give each ephemeral instance a distinct MAC → distinct NAT lease → safe concurrent boot.
+              # The guest matches its NIC by interface name (networkd Name=en*/eth*), not by MAC address,
+              # so patching the runner's mac= literal does not break guest networking.
+              local new_mac
+              new_mac=$(_rand_mac)
+              sed -E "s|mac=([0-9a-f]{2}:){5}[0-9a-f]{2}|mac=$new_mac|" \
+                  "$INST_DIR/microvm-run" > "$INST_DIR/.microvm-run.new"
+              chmod u+x "$INST_DIR/.microvm-run.new"
+              mv "$INST_DIR/.microvm-run.new" "$INST_DIR/microvm-run"
+            fi
+
+            RUNNER="$INST_DIR/microvm-run"
+          }
+
+          vm_up() {
+            local name=''${1:?'Usage: vm up <name>'}
+            # vfkit's virtio-serial,stdio requires a real TTY. Re-exec through a PTY when stdin is not one.
+            if [ "$OS" = "Darwin" ] && ! [ -t 0 ]; then
+              command -v python3 >/dev/null 2>&1 \
+                || { echo "✗ vm up needs python3 to allocate a PTY (vfkit requires a TTY for the serial console)" >&2; return 2; }
+              exec python3 -c 'import pty,sys; pty.spawn(sys.argv[1:])' "$0" up "$name"
+            fi
+            _vm_prepare "$name" || return ''${?}
+            if [ "''${VM_PERSISTENT[$name]:-0}" = 1 ]; then
               echo "→ Launching persistent VM '$name'… (poweroff inside to stop)"
             else
-              echo "→ Launching VM '$name' (instance ''${inst_dir##*/})… (poweroff inside to stop)"
+              echo "→ Launching VM '$name' (instance ''${INST_DIR##*/})… (poweroff inside to stop)"
             fi
-            nix run "$FLAKE#microvm-$name"
+            "$RUNNER"
+          }
+
+          vm_run() {
+            local name=''${1:?'Usage: vm run <name> <command…>'}
+            shift
+            local cmd="$*"
+            [ -n "$cmd" ] || { echo "✗ vm run: command required" >&2; return 2; }
+            command -v python3 >/dev/null 2>&1 || { echo "✗ vm run needs python3 (console driver)" >&2; return 2; }
+            _vm_prepare "$name" || return ''${?}
+            # Base64-encode the command to avoid all quoting hazards on the serial console
+            local b64cmd
+            b64cmd=$(printf '%s' "$cmd" | base64 | tr -d '\n')
+            echo "→ Running in '$name' (instance ''${INST_DIR##*/})…"
+            python3 ${./vm-console-run.py} "$RUNNER" "$b64cmd"
           }
 
           vm_build() {
-            local name=$1
+            local name=''${1:?'Usage: vm build <name>'}
+            local gcroot_dir="$HOME/.local/state/microvm/gcroots"
             echo "→ Building VM '$name'…"
-            nix build "$FLAKE#microvm-$name"
-            echo "✓ Done"
+            mkdir -p "$gcroot_dir"
+            # --out-link registers a GC root: the guest closure survives `nix-collect-garbage`,
+            # so a later `vm up`/`vm run` reuses it instead of rebuilding via the linux-builder.
+            nix build "$FLAKE#microvm-$name" --out-link "$gcroot_dir/microvm-$name"
+            echo "✓ Done (pinned $gcroot_dir/microvm-$name — survives nix GC)"
           }
 
           # Scripted boot smoke-test: build+boot the VM headlessly and assert it reaches multi-user,
@@ -449,13 +523,13 @@ in
           }
 
           vm_down() {
-            local name=$1
-            local state_dir="$HOME/.local/state/microvm/$name"
-            if [ -f "$state_dir/bridge.pid" ]; then
-              kill "$(cat "$state_dir/bridge.pid")" 2>/dev/null && \
-                echo "→ Agent bridge for '$name' stopped"
-              rm -f "$state_dir/bridge.pid"
-              [ "$OS" = "Darwin" ] && rm -f "$state_dir/agent.sock"
+            local name=''${1:?'Usage: vm down <name>'}
+            local base_dir="$HOME/.local/state/microvm/$name"
+            local pid_file="$base_dir/agent-bridge.pid"
+            if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file" 2>/dev/null)" 2>/dev/null; then
+              kill "$(cat "$pid_file")"
+              rm -f "$pid_file"
+              echo "→ Agent bridge for '$name' stopped"
             else
               echo "No running bridge for '$name'"
             fi
@@ -464,9 +538,9 @@ in
           vm_list() {
             echo "Defined microVMs:"
             for name in $DEFINED_VMS; do
-              local state_dir="$HOME/.local/state/microvm/$name"
-              if [ -f "$state_dir/bridge.pid" ] && \
-                 kill -0 "$(cat "$state_dir/bridge.pid")" 2>/dev/null; then
+              local base_dir="$HOME/.local/state/microvm/$name"
+              if [ -f "$base_dir/agent-bridge.pid" ] && \
+                 kill -0 "$(cat "$base_dir/agent-bridge.pid" 2>/dev/null)" 2>/dev/null; then
                 echo "  $name  [bridge running]"
               else
                 echo "  $name  [stopped]"
@@ -474,14 +548,67 @@ in
             done
           }
 
+          # Is a runner process live for this VM? (matches the per-instance/base dir in the cmdline)
+          _vm_running() { pgrep -f "microvm/$1/" >/dev/null 2>&1; }
+
+          # Is the SSH-agent relay actually LISTENING? A live pidfile is not proof — on host
+          # sleep/wake the vmnet gateway churns and socat's bound socket dies under the process.
+          # Darwin = TCP relay on the vfkit NAT gateway; qemu/vsock has no cheap probe (assume ok).
+          _bridge_bound() {
+            [ "$OS" = "Darwin" ] || return 0
+            lsof -nP -iTCP@192.168.65.1:"$1" -sTCP:LISTEN >/dev/null 2>&1
+          }
+
+          # Verify — and self-heal — the SSH-agent bridge of running VM(s). The bridge is a bare
+          # socat bound to the ephemeral vmnet gateway; a host sleep/wake cycle kills it with no
+          # restart, leaving a running VM unable to reach the host agent (git/ssh fail inside).
+          # This repairs it WITHOUT touching vfkit, so an ephemeral VM's /home is never wiped.
+          #   vm doctor                one-shot, all running VMs
+          #   vm doctor <name…>        one-shot, specific VMs
+          #   vm doctor --watch [sec]  keep verifying every <sec> (default 30) — cheap supervisor
+          vm_doctor() {
+            local watch=0 interval=30
+            if [ "''${1:-}" = --watch ]; then
+              watch=1; shift
+              if [ -n "''${1:-}" ] && printf '%s' "''${1}" | grep -qE '^[0-9]+$'; then interval=''${1}; shift; fi
+            fi
+            local targets="$*"; [ -n "$targets" ] || targets="$DEFINED_VMS"
+            while :; do
+              for name in $targets; do
+                local port="''${VM_VSOCK_PORTS[$name]:-}"
+                if [ -z "$port" ]; then echo "· $name: agent forwarding off — skip"; continue; fi
+                if ! _vm_running "$name"; then echo "· $name: not running — skip"; continue; fi
+                local base_dir="$HOME/.local/state/microvm/$name"
+                if _bridge_bound "$port"; then
+                  echo "✓ $name: bridge healthy (192.168.65.1:$port)"
+                else
+                  echo "→ $name: running but bridge down (192.168.65.1:$port) — repairing…"
+                  rm -f "$base_dir/agent-bridge.pid"
+                  rmdir "$base_dir/agent-bridge.lock" 2>/dev/null || true
+                  _ensure_agent_bridge "$name" "$base_dir"
+                fi
+              done
+              [ "$watch" = 1 ] || break
+              sleep "$interval"
+            done
+          }
+
           case "''${1:-}" in
-            build)        vm_build "''${2:?'Usage: vm build <name>'}"; ;;
-            up)           vm_up   "''${2:?'Usage: vm up <name>'}"; ;;
-            test)         vm_test "''${2:?'Usage: vm test <name> [timeout_s]'}" "''${3:-}"; ;;
-            down)         vm_down "''${2:?'Usage: vm down <name>'}"; ;;
-            list)         vm_list; ;;
+            build) vm_build "''${2:?'Usage: vm build <name>'}"; ;;
+            up)    vm_up   "''${2:?'Usage: vm up <name>'}"; ;;
+            run)   vm_run  "''${2:?'Usage: vm run <name> <command…>'}" "''${@:3}"; ;;
+            test)  vm_test "''${2:?'Usage: vm test <name> [timeout_s]'}" "''${3:-}"; ;;
+            down)  vm_down "''${2:?'Usage: vm down <name>'}"; ;;
+            list)  vm_list; ;;
+            doctor) shift; vm_doctor "$@"; ;;
+            builder)
+              shift
+              command -v nix-vm-builder >/dev/null 2>&1 \
+                || { echo "✗ 'vm builder' is macOS-only (the vfkit linux-builder)" >&2; exit 1; }
+              exec nix-vm-builder "$@"
+              ;;
             ""|--help|-h) usage; ;;
-            *)            echo "Unknown command: ''${1}"; echo; usage; exit 1; ;;
+            *) echo "Unknown command: ''${1}"; echo; usage; exit 1; ;;
           esac
         '')
       ];
@@ -614,7 +741,12 @@ in
                       rm -rf "$cache_dir"
 
                       echo "→ Building vfkit runner (darwin-side only, fast)..."
-                      nix build "$FLAKE#packages.aarch64-darwin.microvm-linux-builder"
+                      # --out-link registers a GC root so `nix-collect-garbage` can't reclaim the
+                      # runner and force a full re-bootstrap on the next `builder up`.
+                      local gcroot_dir="$HOME/.local/state/microvm/gcroots"
+                      mkdir -p "$gcroot_dir"
+                      nix build "$FLAKE#packages.aarch64-darwin.microvm-linux-builder" \
+                        --out-link "$gcroot_dir/microvm-linux-builder"
 
                       echo "✓ Bootstrap complete."
                     }
@@ -683,9 +815,9 @@ in
                       status) cmd_status ;;
                       logs)   cmd_logs ;;
                       *)
-                        echo "Usage: builder <up|down|status|logs>"
+                        echo "Usage: vm builder <up|down|status|logs>   (alias: builder …)"
                         echo ""
-                        echo "First run: 'builder up' (or 'nix-vm-builder up') bootstraps automatically via Apple Container when"
+                        echo "First run: 'vm builder up' bootstraps automatically via Apple Container when"
                         echo "the aarch64-linux image is not yet in the nix store (no QEMU required)."
                         ;;
                     esac

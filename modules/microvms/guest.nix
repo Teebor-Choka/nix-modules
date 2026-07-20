@@ -16,9 +16,6 @@ let
   hostHomePrefix = if vmSpec.hypervisor == "vfkit" then "/Users" else "/home";
   hostHome = "${hostHomePrefix}/${vmSpec.user}";
   stateDir = "${hostHome}/.local/state/microvm/${vmName}";
-  # Relative socket path: the `vm` helper launches each instance from its own working directory,
-  # so vfkit resolves this against that per-instance dir (enables concurrent instances).
-  agentSock = "agent.sock"; # only used by vfkit path below
 
   # Share the host /nix/store read-only (vs a per-VM EROFS image). Immutable → safe across
   # concurrent instances. Adding this share flips microvm.storeOnDisk to false automatically.
@@ -134,14 +131,9 @@ in
     vmSpec.hypervisor == "vfkit"
   ) inputs.nixpkgs.legacyPackages.aarch64-darwin;
 
-  # SSH-agent forwarding is optional; the vsock device is only added when it's enabled.
-  microvm.vfkit.extraArgs = lib.mkIf (vmSpec.hypervisor == "vfkit") (
-    (lib.optionals vmSpec.forwardSshAgent [
-      "--device"
-      "virtio-vsock,port=${toString vmSpec.vsockPort},socketURL=${agentSock}"
-    ])
-    ++ vmSpec.vfkitExtraArgs
-  );
+  # vfkit extra args: consumer additions only. The SSH agent no longer uses VSOCK here
+  # (vfkit 0.6.x VSOCK relay is broken — see default.nix). TCP relay is used instead.
+  microvm.vfkit.extraArgs = lib.mkIf (vmSpec.hypervisor == "vfkit") vmSpec.vfkitExtraArgs;
 
   # Guest vsock CID for qemu/vhost-vsock. We reuse vsockPort as CID (≥1024, above reserved range).
   microvm.vsock.cid = lib.mkIf (
@@ -217,7 +209,16 @@ in
     wantedBy = [ "multi-user.target" ];
     serviceConfig = {
       Type = "simple";
-      ExecStart = "${pkgs.socat}/bin/socat UNIX-LISTEN:/run/ssh-agent/agent.sock,fork,mode=0666 VSOCK-CONNECT:2:${toString vmSpec.vsockPort}";
+      ExecStart =
+        let
+          # vfkit: TCP to host NAT gateway (192.168.65.1) — VSOCK relay broken in vfkit 0.6.x.
+          # qemu: VSOCK-CONNECT to the host (CID 2) on the configured vsock port.
+          target =
+            if vmSpec.hypervisor == "vfkit"
+            then "TCP:192.168.65.1:${toString vmSpec.vsockPort}"
+            else "VSOCK-CONNECT:2:${toString vmSpec.vsockPort}";
+        in
+        "${pkgs.socat}/bin/socat UNIX-LISTEN:/run/ssh-agent/agent.sock,fork,mode=0666 ${target}";
       Restart = "on-failure";
       RestartSec = "5s";
       RuntimeDirectory = "ssh-agent";
