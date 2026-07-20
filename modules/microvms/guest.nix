@@ -214,9 +214,10 @@ in
           # vfkit: TCP to host NAT gateway (192.168.65.1) — VSOCK relay broken in vfkit 0.6.x.
           # qemu: VSOCK-CONNECT to the host (CID 2) on the configured vsock port.
           target =
-            if vmSpec.hypervisor == "vfkit"
-            then "TCP:192.168.65.1:${toString vmSpec.vsockPort}"
-            else "VSOCK-CONNECT:2:${toString vmSpec.vsockPort}";
+            if vmSpec.hypervisor == "vfkit" then
+              "TCP:192.168.65.1:${toString vmSpec.vsockPort}"
+            else
+              "VSOCK-CONNECT:2:${toString vmSpec.vsockPort}";
         in
         "${pkgs.socat}/bin/socat UNIX-LISTEN:/run/ssh-agent/agent.sock,fork,mode=0666 ${target}";
       Restart = "on-failure";
