@@ -129,6 +129,31 @@
         }))
       ];
 
+      # Instantiate a minimal NixOS host that includes the microvms module, to extract the
+      # host-side `vm` helper (nix-vm) for black-box CLI tests without a consumer flake.
+      # Linux-only (nixosSystem); on Linux the darwin-only builder helper is absent, so the
+      # `vm builder` macOS-only gate is exercised too.
+      vmHelperFor =
+        hostSys:
+        let
+          host = nixpkgs.lib.nixosSystem {
+            system = hostSys;
+            specialArgs = { inherit inputs; };
+            modules = [
+              home-manager.nixosModules.home-manager
+              self.nixosModules.options
+              self.nixosModules.microvms
+              {
+                custom.username = "tester";
+                custom.microvms.smoke.vsockPort = 9999;
+              }
+            ];
+          };
+        in
+        lib.findFirst (p: (p.name or "") == "nix-vm")
+          (throw "nix-vm helper not found in environment.systemPackages")
+          host.config.environment.systemPackages;
+
       checkSystems = [
         "aarch64-darwin"
         "x86_64-linux"
@@ -143,6 +168,46 @@
           microvm-guest-eval = pkgs.runCommand "microvm-guest-eval" { } ''
             printf '%s\n' ${lib.escapeShellArgs drvs} > "$out"
           '';
+        }
+        # The PTY-driven console suite and the host-eval CLI suite are Linux-only: they need a
+        # working /dev/ptmx and process tools inside the build sandbox. The GitHub macOS runner's
+        # Nix sandbox denies PTY allocation (the suite hangs there), while Linux provides it — and
+        # the console driver logic is OS-agnostic, so Linux coverage guards it fully.
+        // lib.optionalAttrs (hostSys == "x86_64-linux") {
+          # Behavioral regression suite for the `vm run` console driver (echo race, teardown,
+          # exit-code propagation, stdout/stderr merge, fatal-boot detection) — drives the real
+          # driver against fake PTY runners, no VM needed. See tests/console-run-suite.sh.
+          vm-console-run =
+            pkgs.runCommand "vm-console-run"
+              {
+                nativeBuildInputs = [
+                  pkgs.python3
+                  pkgs.bash
+                  pkgs.coreutils
+                  pkgs.gnugrep
+                ];
+              }
+              ''
+                bash ${./tests/console-run-suite.sh} ${./modules/microvms/vm-console-run.py}
+                touch "$out"
+              '';
+
+          # Black-box CLI dispatch tests for the `vm` helper (usage, unknown cmd, list,
+          # doctor-skips-not-running, builder macOS-only gate). See tests/nix-vm-cli-suite.sh.
+          vm-cli =
+            pkgs.runCommand "vm-cli"
+              {
+                nativeBuildInputs = [
+                  pkgs.bash
+                  pkgs.coreutils
+                  pkgs.gnugrep
+                  pkgs.procps
+                ];
+              }
+              ''
+                bash ${./tests/nix-vm-cli-suite.sh} ${vmHelperFor "x86_64-linux"}/bin/nix-vm
+                touch "$out"
+              '';
         }
       );
     in
