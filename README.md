@@ -23,6 +23,7 @@ registry) live in the consuming private repository.
 | `nixosModules.nativeNix` | Nix daemon settings (caches, GC, optimise) |
 | `nixosModules.shared` | Cross-platform base (overlays, zsh, direnv, GPG, fonts, HM wiring) |
 | `nixosModules.microvms` | Host-side microVM module (option schema + `vm`/`builder` helpers) |
+| `lib.mkMicrovmFleet` | Turns a host registry into microVM guest configs + runner packages + checks |
 
 ---
 
@@ -120,6 +121,35 @@ The `custom.username` option has no default — you **must** set it. The minimal
 }
 ```
 
+### 4. Wire the microVM flake outputs (`lib.mkMicrovmFleet`)
+
+Once your hosts declare `custom.microvms.<name>`, the guest configs, `nix run`-able runner
+packages, and the eval/helper `checks` are all derivable from the host registry — you do not
+hand-roll them. Pass your **own inputs** (must provide `nixpkgs` + `microvm`), the raw host
+registry, and the evaluated systems:
+
+```nix
+# flake.nix (private host repo), in the outputs let-block
+fleet = inputs.nix-modules.lib.mkMicrovmFleet {
+  inherit inputs;
+  hosts      = hosts;        # { <name> = { system; class; … }; }  (your raw registry)
+  builtHosts = builtHosts;   # mapAttrs mkHost hosts  (the evaluated darwin/nixos systems)
+  # includeBuilder = true;   # also build the vfkit linux-builder (default true)
+};
+in {
+  nixosConfigurations =
+    <your nixos workstation hosts>
+    // fleet.guestConfigs
+    // { linux-builder = fleet.builderVm; };
+  packages = fleet.packages;         # microvm-<name> per host system (+ microvm-linux-builder)
+  checks   = fleet.checks;           # microvms-eval (per system) + vm-helper (darwin)
+}
+```
+
+`mkMicrovmFleet` returns `{ guestConfigs; builderVm; packages; checks; }`. Each guest is built
+with `inputs.microvm.nixosModules.microvm` + `nixosModules.microvmGuest` + the VM's
+`extraModules`; darwin hosts cross-build to their `-linux` guest system automatically.
+
 ---
 
 ## `custom.*` option surface
@@ -162,8 +192,9 @@ modules/
     core.nix                NixOS workstation base (systemd-boot, NetworkManager, pipewire)
     desktop/gnome.nix       GNOME/Wayland via GDM
   microvms/
-    default.nix             custom.microvms option schema + vm/builder shell helpers
+    default.nix             custom.microvms option schema + vm/builder shell helpers + secret staging
     guest.nix               Shared NixOS guest base (virtiofs, home-manager, vsock bridge)
+    secrets.nix             Guest-side secret injection (KeePassXC → virtiofs → guest target)
     README.md               microVM option reference and usage
   builder/
     guest.nix               Minimal NixOS guest for the vfkit linux-builder
