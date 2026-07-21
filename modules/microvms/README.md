@@ -86,7 +86,9 @@ Per-instance (ephemeral): `~/.local/state/microvm/<name>/run.<pid>.<rand>/` hold
 | `homeBacking` | `auto` | `tmpfs` / `disk` / `auto` (tmpfs when `mem > 2*homeSize`) |
 | `storeBacking` | `host` | `host` = share host `/nix/store` (ro, fast); `image` = per-VM EROFS |
 | `forwardSshAgent` | `true` | Forward the host `$SSH_AUTH_SOCK` over virtio-vsock |
-| `vsockPort` | `null` | vsock port for the forwarded agent (required when `forwardSshAgent`) |
+| `vsockPort` | *(auto: 20000–29999)* | Host-side vsock port / guest CID for the forwarded agent. Auto-derived from the VM name when `forwardSshAgent`; set explicitly to pin. Must be unique among a host's VMs (asserted). |
+| `guestSSH.enable` | `false` | Run sshd in the guest for host→guest debugging (usermode NAT → reach via a host port-forward) |
+| `guestSSH.authorizedKeys` | `[]` | Public keys authorized for the guest user's sshd |
 | `user` | `custom.username` | Guest username |
 | `timeZone` | `Europe/Zurich` | Guest timezone (via `custom.microvmDefaults`) |
 | `locale` | `en_US.UTF-8` | Guest locale |

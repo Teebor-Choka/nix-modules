@@ -188,8 +188,16 @@ in
     isNormalUser = true;
     shell = pkgs.zsh;
     extraGroups = [ "wheel" ];
+    openssh.authorizedKeys.keys = lib.mkIf vmSpec.guestSSH.enable vmSpec.guestSSH.authorizedKeys;
   };
   security.sudo.wheelNeedsPassword = false;
+
+  # ── Optional guest sshd (host→guest debugging / verification). Usermode NAT means it is not
+  #    directly routable — reach it via a host port-forward to the guest IP. Keys-only (no password).
+  services.openssh = lib.mkIf vmSpec.guestSSH.enable {
+    enable = true;
+    settings.PasswordAuthentication = false;
+  };
 
   # Create the user home dir on the (possibly fresh) ext4 home volume.
   # systemd-tmpfiles-setup runs after local-fs.target (all mounts done), so this

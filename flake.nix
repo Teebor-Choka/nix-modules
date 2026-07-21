@@ -207,6 +207,10 @@
           extraHmModules = [ ];
           sshConfig = "";
           sshPubKeys = { };
+          guestSSH = {
+            enable = false;
+            authorizedKeys = [ ];
+          };
           forwardSshAgent = true;
           vsockPort = 9999;
           extraShares = [ ];
@@ -268,6 +272,7 @@
           hypervisor = "vfkit";
         }))
         secretsGuest # secret injection wired (inject-secrets service + injected-secrets share)
+        guestSSHGuest # guest sshd enabled + authorized key placed
       ];
 
       # ── New-functionality test guests + wiring assertions ───────────────────────
@@ -292,6 +297,14 @@
         forwardSshAgent = false;
       });
       baseGuest = mkGuest "aarch64-linux" (mkSpec { }); # forwardSshAgent = true (default)
+      # guestSSH.enable ⇒ sshd runs and the authorized key is placed on the guest user.
+      guestSSHTestKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5TESTKEY tester@host";
+      guestSSHGuest = mkGuest "aarch64-linux" (mkSpec {
+        guestSSH = {
+          enable = true;
+          authorizedKeys = [ guestSSHTestKey ];
+        };
+      });
 
       # Throws (failing the check) if any wiring invariant regresses.
       microvmWiringOk =
@@ -307,6 +320,10 @@
             "ssh-agent-bridge-ready absent when not forwarding" =
               !(noSshGuest.config.systemd.services ? ssh-agent-bridge-ready);
             "github.com knownHost pre-trusted" = baseGuest.config.programs.ssh.knownHosts ? "github.com";
+            "guest sshd enabled when guestSSH.enable" = guestSSHGuest.config.services.openssh.enable;
+            "guest authorized key placed when guestSSH.enable" =
+              lib.elem guestSSHTestKey guestSSHGuest.config.users.users.tester.openssh.authorizedKeys.keys;
+            "guest sshd absent by default" = !baseGuest.config.services.openssh.enable;
           };
           failures = lib.attrNames (lib.filterAttrs (_: ok: !ok) conditions);
         in
@@ -331,6 +348,22 @@
           }
         ];
       };
+      # Two VMs that omit vsockPort → each gets a deterministic auto-derived port; used to
+      # regress the auto-allocation default (in range, distinct) without hand-assigned ports.
+      autoVsockHost = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        specialArgs = { inherit inputs; };
+        modules = [
+          home-manager.nixosModules.home-manager
+          self.nixosModules.options
+          self.nixosModules.microvms
+          {
+            custom.username = "tester";
+            custom.microvms.one = { };
+            custom.microvms.two = { };
+          }
+        ];
+      };
       fleet = mkMicrovmFleet {
         inherit inputs;
         hosts = {
@@ -346,12 +379,17 @@
       };
       fleetOk =
         let
+          autoVms = autoVsockHost.config.custom.microvms;
+          inVsockRange = p: p != null && p >= 20000 && p <= 29999;
           conditions = {
             "guestConfigs has alpha" = fleet.guestConfigs ? alpha;
             "guestConfigs has beta" = fleet.guestConfigs ? beta;
             "packages has microvm-alpha" = fleet.packages.x86_64-linux ? "microvm-alpha";
             "packages has microvm-beta" = fleet.packages.x86_64-linux ? "microvm-beta";
             "checks has microvms-eval" = fleet.checks.x86_64-linux ? microvms-eval;
+            "vsock auto-derived in range (one)" = inVsockRange autoVms.one.vsockPort;
+            "vsock auto-derived in range (two)" = inVsockRange autoVms.two.vsockPort;
+            "vsock auto ports distinct" = autoVms.one.vsockPort != autoVms.two.vsockPort;
           };
           failures = lib.attrNames (lib.filterAttrs (_: ok: !ok) conditions);
         in
