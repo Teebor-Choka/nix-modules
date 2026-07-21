@@ -44,6 +44,31 @@ let
   # guest.nix). The guest service (secrets.nix) places each at its declared target then
   # DELETES the host copy — plaintext is on host disk only for the few seconds until read.
   #
+  # Read the KDBX passphrase from the host OS secret store to stdout (exit 1 if missing).
+  #   macOS → Keychain (`security`); Linux → Secret Service (`secret-tool`, served by KeePassXC
+  #   or GNOME Keyring). `keychainDbPass` is the Keychain service name / secret-tool `service`
+  #   attribute. Host-agnostic so `vm up` works from either a macOS or a Linux control node.
+  fetchPassphrase =
+    keychainDbPass: db:
+    if pkgs.stdenv.isDarwin then
+      ''
+        pw=$(security find-generic-password -w -s ${keychainDbPass} 2>/dev/null) || {
+          echo "secret fetch: macOS Keychain item '${keychainDbPass}' not found." >&2
+          echo "  It must hold the passphrase for KDBX '${db}'." >&2
+          echo "  Create it with:" >&2
+          echo "    security add-generic-password -s ${keychainDbPass} -a \$USER -w" >&2
+          exit 1; }
+      ''
+    else
+      ''
+        pw=$(${pkgs.libsecret}/bin/secret-tool lookup service ${keychainDbPass} 2>/dev/null) || {
+          echo "secret fetch: Secret Service item (service=${keychainDbPass}) not found." >&2
+          echo "  It must hold the passphrase for KDBX '${db}'." >&2
+          echo "  Store it with:" >&2
+          echo "    secret-tool store --label='${keychainDbPass}' service ${keychainDbPass}" >&2
+          exit 1; }
+      '';
+
   # Fetch the configured attribute of a KeePassXC entry and print it to stdout. The content
   # (JSON blob or bare token) is opaque here; placement is declared via secret.target.
   keepassxcFetch =
@@ -56,12 +81,7 @@ let
       ...
     }:
     ''
-      pw=$(security find-generic-password -w -s ${keychainDbPass} 2>/dev/null) || {
-        echo "secret fetch: macOS Keychain item '${keychainDbPass}' not found." >&2
-        echo "  It must hold the passphrase for KDBX '${db}'." >&2
-        echo "  Create it with:" >&2
-        echo "    security add-generic-password -s ${keychainDbPass} -a \$USER -w" >&2
-        exit 1; }
+      ${fetchPassphrase keychainDbPass db}
       printf '%s\n' "$pw" | ${cli} \
         show -q -a ${attribute} "${db}" "${entry}"
     '';
@@ -325,7 +345,9 @@ let
       # ── Secret injection (KeePassXC → virtiofs → guest) ───────────────────────
       # When non-empty, the host stages each secret before launch and the guest places it
       # at its target then wipes the host copy (see secrets.nix). The /run/injected-secrets
-      # share is added automatically. macOS host only (uses the Keychain + KeePassXC CLI).
+      # share is added automatically. Works from a macOS or Linux control node: the KDBX
+      # passphrase is read from the macOS Keychain (`security`) or the Linux Secret Service
+      # (`secret-tool`), and keepassxcCli defaults per platform.
       secrets = mkOption {
         type = types.listOf (
           types.submodule {
@@ -336,7 +358,7 @@ let
               };
               keychainDbPass = mkOption {
                 type = types.str;
-                description = "macOS Keychain service name holding the KDBX passphrase.";
+                description = "Host secret-store key holding the KDBX passphrase: macOS Keychain service name, or Linux secret-tool `service` attribute.";
               };
               entry = mkOption {
                 type = types.str;
@@ -376,8 +398,12 @@ let
       };
       keepassxcCli = mkOption {
         type = types.str;
-        default = "/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli";
-        description = "Path to the keepassxc-cli binary used to fetch secrets on the host.";
+        default =
+          if pkgs.stdenv.isDarwin then
+            "/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli"
+          else
+            "keepassxc-cli";
+        description = "Path to the keepassxc-cli binary used to fetch secrets on the host (macOS app bundle path / `keepassxc-cli` on PATH for Linux).";
       };
     };
   };

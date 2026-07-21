@@ -377,6 +377,16 @@
               {
                 custom.username = "tester";
                 custom.microvms.smoke.vsockPort = 9999;
+                # A secret forces the host-side staging into the baked `nix-vm` wrapper. On a
+                # Linux host this exercises the secret-tool branch (bash -n via writeShellScriptBin).
+                custom.microvms.smoke.secrets = [
+                  {
+                    db = "/tmp/test.kdbx";
+                    keychainDbPass = "test-svc";
+                    entry = "Test/Entry";
+                    target.filePath = ".secret";
+                  }
+                ];
               }
             ];
           };
