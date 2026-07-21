@@ -1,6 +1,10 @@
 # home-manager/home.nix
 { pkgs, ... }: {
-  imports = [ ./git-clone.nix ];
+  imports = [
+    ./git-clone.nix
+    ./git-refresh.nix # opt-in: home.gitRefresh.enable — keep gitClone checkouts current
+    ./skill-link.nix # opt-in: home.skillLink — flatten SKILL.md dirs into ~/.claude/skills
+  ];
 
   home.stateVersion = "24.05";
 

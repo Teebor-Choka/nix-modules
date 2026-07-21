@@ -11,6 +11,10 @@ with lib;
 let
   cfg = config.custom.microvms;
   flakeDir = config.custom.flakeDir;
+  # The vmSubmodule below takes its own `config` arg (for sibling-option defaults like vsockPort),
+  # which shadows this outer module config. Alias it so submodule defaults that need HOST options
+  # (custom.username / custom.microvmDefaults) still reach them.
+  hostConfig = config;
 
   vmNames = attrNames cfg;
   vmNamesStr = concatStringsSep " " vmNames;
@@ -35,6 +39,39 @@ let
       o = i: substring (i * 2) 2 h;
     in
     "02:${o 1}:${o 2}:${o 3}:${o 4}:${o 5}";
+
+  # Deterministic host-side vsock port / CID for a VM, derived from its name so the consumer
+  # needn't hand-assign (and hand-deconflict) ports. Range 20000–29999 clears privileged and
+  # common service ports plus the macOS ephemeral range (49152+); a per-host assertion (see
+  # config below) catches the rare hash collision. Setting vsockPort explicitly overrides this.
+  hexDigit =
+    c:
+    {
+      "0" = 0;
+      "1" = 1;
+      "2" = 2;
+      "3" = 3;
+      "4" = 4;
+      "5" = 5;
+      "6" = 6;
+      "7" = 7;
+      "8" = 8;
+      "9" = 9;
+      "a" = 10;
+      "b" = 11;
+      "c" = 12;
+      "d" = 13;
+      "e" = 14;
+      "f" = 15;
+    }
+    .${c};
+  hexToInt = s: foldl' (acc: c: acc * 16 + hexDigit c) 0 (stringToCharacters s);
+  autoVsockPort =
+    name:
+    let
+      n = hexToInt (substring 0 6 (builtins.hashString "sha256" name));
+    in
+    20000 + (n - (n / 10000) * 10000); # 20000 + (n mod 10000)
 
   # ── Secret injection (host side) ────────────────────────────────────────────
   # Generic KeePassXC → virtiofs → guest placer. vfkit/AVF allows only ONE virtio-vsock
@@ -119,7 +156,7 @@ let
     ''
     + concatStringsSep "\n" (imap0 fetchOne spec.secrets);
 
-  vmSubmodule = { name, ... }: {
+  vmSubmodule = { name, config, ... }: {
     options = {
       hypervisor = mkOption {
         type = types.str;
@@ -144,15 +181,15 @@ let
       };
       user = mkOption {
         type = types.str;
-        default = config.custom.username;
+        default = hostConfig.custom.username;
       };
       timeZone = mkOption {
         type = types.str;
-        default = config.custom.microvmDefaults.timeZone;
+        default = hostConfig.custom.microvmDefaults.timeZone;
       };
       locale = mkOption {
         type = types.str;
-        default = config.custom.microvmDefaults.locale;
+        default = hostConfig.custom.microvmDefaults.locale;
       };
       autologin = mkOption {
         type = types.bool;
@@ -235,6 +272,23 @@ let
         description = "Public key files to place in ~/.ssh/ (filename → content)";
         example = literalExpression ''{ "work.pub" = "ssh-ed25519 AAAA…"; }'';
       };
+      guestSSH = {
+        enable = mkOption {
+          type = types.bool;
+          default = false;
+          description = ''
+            Run sshd inside the guest for host→guest access (debugging / verification). Networking
+            is usermode NAT, so reach it via a host port-forward to the guest IP. Password auth is
+            disabled; authorize access via guestSSH.authorizedKeys.
+          '';
+        };
+        authorizedKeys = mkOption {
+          type = types.listOf types.str;
+          default = [ ];
+          description = "Public keys authorized for the guest user's sshd (used when guestSSH.enable).";
+          example = literalExpression ''[ "ssh-ed25519 AAAA… user@host" ]'';
+        };
+      };
       forwardSshAgent = mkOption {
         type = types.bool;
         default = true;
@@ -242,8 +296,13 @@ let
       };
       vsockPort = mkOption {
         type = types.nullOr types.int;
-        default = null;
-        description = "Unique virtio-vsock port for the forwarded SSH agent. Required when forwardSshAgent = true.";
+        default = if config.forwardSshAgent then autoVsockPort name else null;
+        defaultText = literalExpression "auto-derived from the VM name (20000–29999) when forwardSshAgent, else null";
+        description = ''
+          Host-side virtio-vsock port (also the guest CID under qemu) for the forwarded SSH agent.
+          Defaults to a deterministic per-name port so ports need not be hand-assigned; set it
+          explicitly to pin a port. Must be unique among the VMs on a single host.
+        '';
       };
       extraShares = mkOption {
         type = types.listOf (
@@ -457,15 +516,33 @@ in
     # ── Common (both platforms) ────────────────────────────────────────────────
     {
       # Each secret target must set exactly one of filePath / envName.
-      assertions = concatLists (
-        mapAttrsToList (
-          name: spec:
-          imap0 (i: s: {
-            assertion = (s.target.filePath != null) != (s.target.envName != null);
-            message = "microVM '${name}': secrets[${toString i}].target must set exactly one of 'filePath' or 'envName'.";
-          }) spec.secrets
-        ) cfg
-      );
+      assertions =
+        concatLists (
+          mapAttrsToList (
+            name: spec:
+            imap0 (i: s: {
+              assertion = (s.target.filePath != null) != (s.target.envName != null);
+              message = "microVM '${name}': secrets[${toString i}].target must set exactly one of 'filePath' or 'envName'.";
+            }) spec.secrets
+          ) cfg
+        )
+        # vsockPort is a per-host resource (host-side socat port + guest CID); the auto-derived
+        # default can (rarely) collide. Two VMs on the SAME host must not share one.
+        ++ (
+          let
+            activePorts = mapAttrsToList (_: s: s.vsockPort) (
+              filterAttrs (_: s: s.forwardSshAgent && s.vsockPort != null) cfg
+            );
+          in
+          [
+            {
+              assertion = activePorts == unique activePorts;
+              message = "microVMs on this host have colliding vsockPorts (${
+                concatMapStringsSep ", " toString activePorts
+              }). Set an explicit unique vsockPort on the conflicting VM(s).";
+            }
+          ]
+        );
 
       environment.systemPackages = [
         pkgs.socat
