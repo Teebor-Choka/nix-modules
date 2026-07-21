@@ -107,6 +107,42 @@ Per-instance (ephemeral): `~/.local/state/microvm/<name>/run.<pid>.<rand>/` hold
 | `vfkitExtraArgs` | `[]` | Extra vfkit CLI arguments |
 | `extraModules` | `[]` | Extra guest NixOS modules (packages, overlays, services) |
 | `hostPreLaunch` | `""` | Host shell run in the instance dir before launch (secret/mount hooks) |
+| `secrets` | `[]` | Secrets fetched from KeePassXC at launch and injected into the guest (see below) |
+| `keepassxcCli` | *(per-OS)* | `keepassxc-cli` binary on the host (macOS app-bundle path / `keepassxc-cli` on PATH for Linux) |
+
+Built-in behaviour (no consumer wiring needed):
+- When `forwardSshAgent = true`, an `ssh-agent-bridge-ready` oneshot gates
+  `home-manager-<user>.service` until `/run/ssh-agent/agent.sock` exists — so `home.gitClone`
+  over SSH doesn't race the agent bridge coming up.
+- `github.com` SSH host keys are pre-trusted (ed25519 + ecdsa) so a first-boot `home.gitClone`
+  over SSH succeeds without prompting.
+
+---
+
+## Secret injection (`secrets`)
+
+Works from a macOS or Linux control node. Each `vm up` fetches the declared KeePassXC entries,
+stages them in the per-instance working dir, and shares them into the guest at
+`/run/injected-secrets` (the share is added automatically). A guest oneshot (`inject-secrets`,
+ordered after home-manager) places each secret at its target, then **deletes the host copy** —
+plaintext lives on host disk only until the guest reads it.
+
+```nix
+{ custom.microvms.myvm.secrets = [
+    { db = "$HOME/work.kdbx";                 # KDBX path ($HOME expands on host)
+      keychainDbPass = "keepassxc-work";      # host secret-store key for the KDBX passphrase
+      entry = "Network/Services/ClaudeCode";  # KeePassXC entry path ('>' → '/')
+      target.filePath = ".claude/.credentials.json"; }   # OR target.envName = "MY_TOKEN";
+  ];
+}
+```
+
+Each `target` must set **exactly one** of `filePath` (written as a file relative to the guest
+home) or `envName` (exported to login shells + systemd `environment.d`). The KDBX passphrase is
+read from the host secret store — store it once (matching `keychainDbPass`):
+
+- **macOS** (Keychain): `security add-generic-password -s <keychainDbPass> -a $USER -w`
+- **Linux** (Secret Service — KeePassXC/GNOME Keyring): `secret-tool store --label='<keychainDbPass>' service <keychainDbPass>`
 
 ---
 

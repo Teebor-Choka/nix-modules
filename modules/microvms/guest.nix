@@ -53,6 +53,7 @@ in
 {
   imports = [
     inputs.home-manager.nixosModules.home-manager
+    ./secrets.nix # generic secret injection (no-op unless vmSpec.secrets is set)
   ];
 
   # ── Writable store overlay: per-instance RAM. With no volume backing it, the upperdir lives
@@ -81,6 +82,13 @@ in
       source = "/nix/store";
       mountPoint = "/nix/.ro-store";
       tag = "ro-store";
+      proto = "virtiofs";
+    }
+    # Secret staging area (host stages secrets/secret-<i> here; secrets.nix reads + wipes them).
+    ++ lib.optional (vmSpec.secrets != [ ]) {
+      source = "secrets";
+      mountPoint = "/run/injected-secrets";
+      tag = "injected-secrets";
       proto = "virtiofs";
     };
 
@@ -230,6 +238,48 @@ in
   # Point SSH_AUTH_SOCK at the forwarded agent for all login sessions (when enabled).
   environment.variables = lib.mkIf vmSpec.forwardSshAgent {
     SSH_AUTH_SOCK = "/run/ssh-agent/agent.sock";
+  };
+
+  # ssh-agent-bridge is Type=simple: systemd marks it "active" the moment socat forks,
+  # before the UNIX socket at /run/ssh-agent/agent.sock actually exists. home-manager
+  # activation may run home.gitClone (which needs SSH_AUTH_SOCK), so we interpose a oneshot
+  # "ready" service that polls until the socket appears, and order home-manager after it.
+  systemd.services.ssh-agent-bridge-ready = lib.mkIf vmSpec.forwardSshAgent {
+    description = "Wait for SSH agent bridge socket to be ready";
+    after = [ "ssh-agent-bridge.service" ];
+    requires = [ "ssh-agent-bridge.service" ];
+    before = [ "home-manager-${vmSpec.user}.service" ];
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = pkgs.writeShellScript "ssh-agent-bridge-wait" ''
+        for i in $(seq 30); do
+          [ -S /run/ssh-agent/agent.sock ] && exit 0
+          sleep 1
+        done
+        echo "ssh-agent socket did not appear after 30s" >&2
+        exit 1
+      '';
+    };
+  };
+
+  systemd.services."home-manager-${vmSpec.user}" = lib.mkIf vmSpec.forwardSshAgent {
+    after = [ "ssh-agent-bridge-ready.service" ];
+    wants = [ "ssh-agent-bridge-ready.service" ];
+    environment.SSH_AUTH_SOCK = "/run/ssh-agent/agent.sock";
+  };
+
+  # GitHub SSH host keys — pre-trusted so home.gitClone over SSH doesn't fail on first boot.
+  # Writes to /etc/ssh/ssh_known_hosts (system-wide). Rotate if GitHub announces a key change.
+  programs.ssh.knownHosts = {
+    "github.com" = {
+      publicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl";
+    };
+    "github.com-ecdsa" = {
+      hostNames = [ "github.com" ];
+      publicKey = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=";
+    };
   };
 
   # ── Timezone + locale (match the host)

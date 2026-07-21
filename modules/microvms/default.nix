@@ -36,6 +36,89 @@ let
     in
     "02:${o 1}:${o 2}:${o 3}:${o 4}:${o 5}";
 
+  # ── Secret injection (host side) ────────────────────────────────────────────
+  # Generic KeePassXC → virtiofs → guest placer. vfkit/AVF allows only ONE virtio-vsock
+  # device (used by the SSH agent), so secrets are delivered via a virtiofs share: at launch
+  # the host fetches each secret from KeePassXC and stages it as secrets/secret-<i> in the
+  # per-instance working dir (auto-shared into the guest at /run/injected-secrets — see
+  # guest.nix). The guest service (secrets.nix) places each at its declared target then
+  # DELETES the host copy — plaintext is on host disk only for the few seconds until read.
+  #
+  # Read the KDBX passphrase from the host OS secret store to stdout (exit 1 if missing).
+  #   macOS → Keychain (`security`); Linux → Secret Service (`secret-tool`, served by KeePassXC
+  #   or GNOME Keyring). `keychainDbPass` is the Keychain service name / secret-tool `service`
+  #   attribute. Host-agnostic so `vm up` works from either a macOS or a Linux control node.
+  fetchPassphrase =
+    keychainDbPass: db:
+    if pkgs.stdenv.isDarwin then
+      ''
+        pw=$(security find-generic-password -w -s ${keychainDbPass} 2>/dev/null) || {
+          echo "secret fetch: macOS Keychain item '${keychainDbPass}' not found." >&2
+          echo "  It must hold the passphrase for KDBX '${db}'." >&2
+          echo "  Create it with:" >&2
+          echo "    security add-generic-password -s ${keychainDbPass} -a \$USER -w" >&2
+          exit 1; }
+      ''
+    else
+      ''
+        pw=$(${pkgs.libsecret}/bin/secret-tool lookup service ${keychainDbPass} 2>/dev/null) || {
+          echo "secret fetch: Secret Service item (service=${keychainDbPass}) not found." >&2
+          echo "  It must hold the passphrase for KDBX '${db}'." >&2
+          echo "  Store it with:" >&2
+          echo "    secret-tool store --label='${keychainDbPass}' service ${keychainDbPass}" >&2
+          exit 1; }
+      '';
+
+  # Fetch the configured attribute of a KeePassXC entry and print it to stdout. The content
+  # (JSON blob or bare token) is opaque here; placement is declared via secret.target.
+  keepassxcFetch =
+    cli:
+    {
+      db,
+      keychainDbPass,
+      entry,
+      attribute ? "password",
+      ...
+    }:
+    ''
+      ${fetchPassphrase keychainDbPass db}
+      printf '%s\n' "$pw" | ${cli} \
+        show -q -a ${attribute} "${db}" "${entry}"
+    '';
+
+  # Build the host pre-launch shell that fetches each secret and stages it atomically.
+  # CWD = per-instance working dir; "secrets/" is the virtiofs source for the guest.
+  # $name is the VM name (a shell var set by _vm_prepare).
+  mkSecretsHook =
+    spec:
+    let
+      fetchOne =
+        i: secret:
+        let
+          idx = toString i;
+        in
+        ''
+          fetch_secret_${idx}() {
+          ${keepassxcFetch spec.keepassxcCli (builtins.removeAttrs secret [ "target" ])}
+          }
+          rm -f secrets/secret-${idx} secrets/secret-${idx}.new
+          if ( fetch_secret_${idx} ) > secrets/secret-${idx}.new 2>/dev/null \
+              && [ -s secrets/secret-${idx}.new ]; then
+            chmod 600 secrets/secret-${idx}.new
+            mv secrets/secret-${idx}.new secrets/secret-${idx}
+            echo "→ secret[${idx}] staged for $name"
+          else
+            rm -f secrets/secret-${idx}.new
+            echo "⚠  secret[${idx}] fetch failed for $name — will be skipped in guest"
+          fi
+        '';
+    in
+    ''
+      install -d -m 700 secrets
+      umask 077
+    ''
+    + concatStringsSep "\n" (imap0 fetchOne spec.secrets);
+
   vmSubmodule = { name, ... }: {
     options = {
       hypervisor = mkOption {
@@ -258,17 +341,90 @@ let
           library knowing about them. Guest-side pieces go through extraModules.
         '';
       };
+
+      # ── Secret injection (KeePassXC → virtiofs → guest) ───────────────────────
+      # When non-empty, the host stages each secret before launch and the guest places it
+      # at its target then wipes the host copy (see secrets.nix). The /run/injected-secrets
+      # share is added automatically. Works from a macOS or Linux control node: the KDBX
+      # passphrase is read from the macOS Keychain (`security`) or the Linux Secret Service
+      # (`secret-tool`), and keepassxcCli defaults per platform.
+      secrets = mkOption {
+        type = types.listOf (
+          types.submodule {
+            options = {
+              db = mkOption {
+                type = types.str;
+                description = "Path to the KDBX file (host shell expands $HOME).";
+              };
+              keychainDbPass = mkOption {
+                type = types.str;
+                description = "Host secret-store key holding the KDBX passphrase: macOS Keychain service name, or Linux secret-tool `service` attribute.";
+              };
+              entry = mkOption {
+                type = types.str;
+                description = ''KeePassXC entry path; UI '>' group separator becomes '/' (e.g. "Network/Services/ClaudeCode").'';
+              };
+              attribute = mkOption {
+                type = types.str;
+                default = "password";
+                description = "KeePassXC attribute to read (default: the entry password).";
+              };
+              target = mkOption {
+                description = "Where the fetched secret is placed in the guest — set exactly one of filePath / envName.";
+                type = types.submodule {
+                  options = {
+                    filePath = mkOption {
+                      type = types.nullOr types.str;
+                      default = null;
+                      description = "Path relative to the guest home to write the secret to.";
+                    };
+                    envName = mkOption {
+                      type = types.nullOr types.str;
+                      default = null;
+                      description = "Environment variable name to expose the secret as (login shells + systemd).";
+                    };
+                  };
+                };
+              };
+            };
+          }
+        );
+        default = [ ];
+        description = "Secrets fetched from KeePassXC at launch and injected into the guest.";
+        example = literalExpression ''
+          [{ db = "$HOME/work.kdbx"; keychainDbPass = "keepassxc-work";
+             entry = "Network/Services/ClaudeCode"; target.filePath = ".claude/.credentials.json"; }]
+        '';
+      };
+      keepassxcCli = mkOption {
+        type = types.str;
+        default =
+          if pkgs.stdenv.isDarwin then
+            "/Applications/KeePassXC.app/Contents/MacOS/keepassxc-cli"
+          else
+            "keepassxc-cli";
+        description = "Path to the keepassxc-cli binary used to fetch secrets on the host (macOS app bundle path / `keepassxc-cli` on PATH for Linux).";
+      };
     };
   };
 
-  # Per-VM host launch hook dispatch (a shell `case` body). Runs the consumer-provided
-  # hostPreLaunch shell for the VM being started. Multi-line, hence a case (not an assoc map).
+  # Per-VM host launch hook dispatch (a shell `case` body). Stages secrets (when declared)
+  # then runs the consumer-provided hostPreLaunch shell for the VM being started.
+  # Multi-line, hence a case (not an assoc map).
   hostPreLaunchDispatch = concatStringsSep "\n" (
     mapAttrsToList (
       name: spec:
-      optionalString (spec.hostPreLaunch != "") ''
+      let
+        combined = concatStringsSep "\n" (
+          filter (s: s != "") [
+            (optionalString (spec.secrets != [ ]) (mkSecretsHook spec))
+            spec.hostPreLaunch
+          ]
+        );
+      in
+      optionalString (combined != "") ''
               ${name})
-        ${spec.hostPreLaunch}
+        ${combined}
                 ;;''
     ) cfg
   );
@@ -300,6 +456,17 @@ in
   config = mkIf (cfg != { }) (mkMerge [
     # ── Common (both platforms) ────────────────────────────────────────────────
     {
+      # Each secret target must set exactly one of filePath / envName.
+      assertions = concatLists (
+        mapAttrsToList (
+          name: spec:
+          imap0 (i: s: {
+            assertion = (s.target.filePath != null) != (s.target.envName != null);
+            message = "microVM '${name}': secrets[${toString i}].target must set exactly one of 'filePath' or 'envName'.";
+          }) spec.secrets
+        ) cfg
+      );
+
       environment.systemPackages = [
         pkgs.socat
 
