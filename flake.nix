@@ -455,6 +455,13 @@
               echo "microvm secret-injection + ssh-agent wiring OK" > "$out"
             ''
           );
+
+          # The live smoke suite can't run in the sandbox (needs a real hypervisor + network),
+          # so it isn't a runnable check — but syntax-check it so a broken edit fails CI.
+          vm-smoke-syntax = pkgs.runCommand "vm-smoke-syntax" { nativeBuildInputs = [ pkgs.bash ]; } ''
+            bash -n ${./tests/vm-smoke-suite.sh}
+            touch "$out"
+          '';
         }
         # The PTY-driven console suite and the host-eval CLI suite are Linux-only: they need a
         # working /dev/ptmx and process tools inside the build sandbox. The GitHub macOS runner's

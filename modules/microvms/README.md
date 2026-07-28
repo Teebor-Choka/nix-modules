@@ -148,6 +148,34 @@ read from the host secret store — store it once (matching `keychainDbPass`):
 
 ---
 
+## Smoke testing (live)
+
+`tests/vm-smoke-suite.sh` is a generic, parameterized live smoke test for the machinery this
+module owns: boot + autologin, forwarded SSH agent, outbound DNS+HTTPS, guest NAT lease,
+exit-code propagation, and ephemeral concurrency. It boots real ephemeral instances via
+`nix-vm run`, so — unlike the sandboxed `console-run`/`nix-vm-cli` suites — it is **not** a `nix
+flake check` derivation (the flake only `bash -n`-checks it via `vm-smoke-syntax`); run it on a
+configured host.
+
+It carries no personal values — pass them via env, and keep consumer-specific guest-content
+checks (dotfiles, private repos, per-tool CLIs) in a thin wrapper in your own flake:
+
+```bash
+VM=claude EXPECT_USER=alice GIT_REMOTE=git@github.com:me/repo.git \
+  bash "${nix-modules}/tests/vm-smoke-suite.sh" all
+```
+
+| Env | Required | Meaning |
+|-----|----------|---------|
+| `VM` | yes | microVM name to boot |
+| `EXPECT_USER` | yes | autologin username to assert |
+| `GIT_REMOTE` | no | ssh git remote for the forwarded-agent auth check (skipped if unset) |
+| `NIX_VM` | no | path to the `nix-vm` helper (default: `nix-vm` on `PATH`) |
+
+Modes: `serial` · `concurrent` · `all` (default). Exits non-zero if any check fails.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Fix |
