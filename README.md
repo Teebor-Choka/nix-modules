@@ -13,7 +13,7 @@ registry) live in the consuming private repository.
 
 | Output | Description |
 |--------|-------------|
-| `homeManagerModules.default` | Generic home-manager base (coreutils, htop, zsh/bash) |
+| `homeModules.default` | Generic home-manager base (coreutils, htop, zsh/bash) |
 | `darwinModules.default` | macOS host module (Homebrew, TouchID sudo, Spotlight alias) |
 | `nixosModules.core` | NixOS workstation base (systemd-boot, NetworkManager, pipewire) |
 | `nixosModules.gnome` | GNOME/Wayland desktop via GDM |
@@ -45,13 +45,18 @@ inputs = {
   microvm.url        = "github:microvm-nix/microvm.nix";
   microvm.inputs.nixpkgs.follows = "nixpkgs";
 
-  # This repo
+  # This repo — declares its own (test-only) inputs; point them at yours to dedupe the lock.
   nix-modules.url    = "github:Teebor-Choka/nix-modules";
+  nix-modules.inputs.nixpkgs.follows          = "nixpkgs";
+  nix-modules.inputs.home-manager.follows     = "home-manager";
+  nix-modules.inputs.microvm.follows          = "microvm";
+  nix-modules.inputs.nixneovimplugins.follows = "nixneovimplugins";
 };
 ```
 
-> `nix-modules` declares **no inputs** — no `follows` wiring is needed. The consuming flake's own
-> inputs are passed to the modules via `specialArgs.inputs`.
+> `nix-modules`' inputs are **test-only** (used solely by its own `nix flake check`); the modules
+> receive the consuming flake's inputs via `specialArgs.inputs` and don't depend on them. The
+> `follows` lines above keep the lock deduped to one `nixpkgs` — recommended, not required.
 
 ### 2. Wire the modules
 
@@ -181,7 +186,7 @@ Declared in `modules/options.nix` and `modules/microvms/default.nix`.
 ## Layout
 
 ```
-flake.nix                   Module outputs (no inputs)
+flake.nix                   Module outputs + test-only inputs (consumers dedupe via follows)
 modules/
   options.nix               custom.* option declarations
   native-nix.nix            Nix daemon settings (caches, GC, optimise)

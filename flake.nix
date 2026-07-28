@@ -27,12 +27,12 @@
       lib = nixpkgs.lib;
 
       # ── module outputs (raw paths — consumers import these) ─────────────────────
-      # All modules live under the recognized `nixosModules` / `darwinModules` / `homeManagerModules`
+      # All modules live under the recognized `nixosModules` / `darwinModules` / `homeModules`
       # outputs (so `nix flake check` stays warning-free). The cross-platform ones (options, nativeNix,
       # shared, microvms) use only options common to nix-darwin and NixOS, so they import cleanly on
       # both — the `nixosModules` label is a namespace, not a platform restriction.
       moduleOutputs = {
-        homeManagerModules.default = ./home-manager/home.nix;
+        homeModules.default = ./home-manager/home.nix;
         darwinModules.default = ./modules/darwin/core.nix;
         nixosModules = {
           core = ./modules/nixos/core.nix;
