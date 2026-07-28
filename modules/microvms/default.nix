@@ -11,9 +11,8 @@ with lib;
 let
   cfg = config.custom.microvms;
   flakeDir = config.custom.flakeDir;
-  # The vmSubmodule below takes its own `config` arg (for sibling-option defaults like vsockPort),
-  # which shadows this outer module config. Alias it so submodule defaults that need HOST options
-  # (custom.username / custom.microvmDefaults) still reach them.
+  # vmSubmodule's own `config` arg shadows this outer one; alias it so submodule defaults can
+  # still reach HOST options (custom.username / custom.microvmDefaults).
   hostConfig = config;
 
   vmNames = attrNames cfg;

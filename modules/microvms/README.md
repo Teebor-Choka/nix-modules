@@ -39,11 +39,13 @@ These modules are input-free; the consuming flake passes its own inputs via `spe
 ## Usage
 
 ```bash
-vm up    <name>          # start VM (forwards the host SSH agent, attaches serial console)
-vm test  <name> [secs]   # headless smoke-test: boot to multi-user then tear down (exit 0 = pass)
-vm down  <name>          # tear down agent bridge (poweroff inside the VM to stop it)
-vm list                  # show defined VMs
-vm build <name>          # pre-build the guest image
+vm up     <name>          # start VM (forwards the host SSH agent, attaches serial console)
+vm run    <name> <cmd…>   # boot headless, run a command, stream output, propagate exit code
+vm test   <name> [secs]   # headless smoke-test: boot to multi-user then tear down (exit 0 = pass)
+vm down   <name>          # tear down agent bridge (poweroff inside the VM to stop it)
+vm list                   # show defined VMs
+vm build  <name>          # pre-build the guest image
+vm doctor [name…]         # verify / self-heal the SSH-agent bridge of running VM(s)
 ```
 
 `vm up` runs in the foreground (serial console). Type `poweroff` inside to stop; ephemeral state is

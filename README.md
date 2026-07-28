@@ -237,9 +237,9 @@ Quick definition (inline in your `flake.nix`):
 
 ```nix
 { custom.microvms.myvm = {
-    vsockPort      = 1024;         # unique per VM per host
     extraHmModules = [ ./users/<user>/home.nix ];
     extraShares    = [{ source = "/path/on/host"; mountPoint = "/path/in/guest"; }];
+    # vsockPort auto-derives from the VM name (20000–29999); set it only to pin a port.
 }; }
 ```
 
