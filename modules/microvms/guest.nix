@@ -11,8 +11,7 @@
   ...
 }:
 let
-  # Host-side path prefix: /Users on macOS (vfkit), /home on Linux (qemu).
-  # Derived from hypervisor since vfkit→darwin, qemu→linux.
+  # Host path prefix, derived from hypervisor: /Users (vfkit/macOS) vs /home (qemu/Linux).
   hostHomePrefix = if vmSpec.hypervisor == "vfkit" then "/Users" else "/home";
   hostHome = "${hostHomePrefix}/${vmSpec.user}";
   stateDir = "${hostHome}/.local/state/microvm/${vmName}";
