@@ -33,6 +33,16 @@ with lib;
           default = null;
           description = "Shallow-clone depth. When set, clones with --depth <n> --single-branch.";
         };
+        options.readOnly = mkOption {
+          type = types.bool;
+          default = false;
+          description = ''
+            Treat as a read-only mirror you never edit locally. On activation, gitRefresh
+            hard-resets it to the upstream tip (discarding local commits and tracked edits;
+            untracked files are kept) instead of the safe fast-forward used for normal repos.
+            This lands on the remote tip even across force-pushes and shallow clones.
+          '';
+        };
       }
     );
   };
