@@ -34,21 +34,27 @@ out=$("$vm" builder status 2>&1); rc=$?
 { [ "$rc" = 1 ] && grep -qi 'macOS-only' <<<"$out"; } && ok "builder → macOS-only error on Linux" || bad "builder gate"
 
 # ── Launch-time trust resolution (VM_DEBUG_GRANT prints the grant and exits before any build) ──
-# The 'smoke' VM declares trust.default = [ "secrets" ].
+# The 'smoke' VM declares trust.default = [ "secrets" "agent" ]. Matches are exact-line (grep -x).
 out=$(VM_DEBUG_GRANT=1 "$vm" run smoke true 2>&1); rc=$?
-{ [ "$rc" = 0 ] && grep -q 'grant: secrets' <<<"$out"; } && ok "run smoke → default grant = secrets" || bad "default grant"
+{ [ "$rc" = 0 ] && grep -qx 'grant: secrets agent' <<<"$out"; } && ok "run smoke → default grant = secrets agent" || bad "default grant"
 
 out=$(VM_DEBUG_GRANT=1 "$vm" run --isolated smoke true 2>&1); rc=$?
-{ [ "$rc" = 0 ] && grep -q 'grant: <none>' <<<"$out"; } && ok "run --isolated → grant none (overrides default)" || bad "isolated override"
+{ [ "$rc" = 0 ] && grep -qx 'grant: <none>' <<<"$out"; } && ok "run --isolated → grant none (overrides default)" || bad "isolated override"
 
 out=$(VM_DEBUG_GRANT=1 "$vm" run --trusted smoke true 2>&1); rc=$?
-{ [ "$rc" = 0 ] && grep -q 'grant: secrets' <<<"$out"; } && ok "run --trusted → all tokens" || bad "trusted grant"
+{ [ "$rc" = 0 ] && grep -qx 'grant: secrets agent' <<<"$out"; } && ok "run --trusted → all tokens" || bad "trusted grant"
 
 out=$(VM_DEBUG_GRANT=1 "$vm" run --trust secrets smoke true 2>&1); rc=$?
-{ [ "$rc" = 0 ] && grep -q 'grant: secrets' <<<"$out"; } && ok "run --trust secrets → secrets" || bad "explicit grant"
+{ [ "$rc" = 0 ] && grep -qx 'grant: secrets' <<<"$out"; } && ok "run --trust secrets → secrets only" || bad "explicit secrets"
+
+out=$(VM_DEBUG_GRANT=1 "$vm" run --trust agent smoke true 2>&1); rc=$?
+{ [ "$rc" = 0 ] && grep -qx 'grant: agent' <<<"$out"; } && ok "run --trust agent → agent only" || bad "explicit agent"
+
+out=$(VM_DEBUG_GRANT=1 "$vm" run --trust secrets,agent smoke true 2>&1); rc=$?
+{ [ "$rc" = 0 ] && grep -qx 'grant: secrets agent' <<<"$out"; } && ok "run --trust secrets,agent → both" || bad "explicit both"
 
 out=$(VM_DEBUG_GRANT=1 "$vm" up --isolated smoke 2>&1); rc=$?
-{ [ "$rc" = 0 ] && grep -q 'grant: <none>' <<<"$out"; } && ok "up --isolated → grant none" || bad "up isolated"
+{ [ "$rc" = 0 ] && grep -qx 'grant: <none>' <<<"$out"; } && ok "up --isolated → grant none" || bad "up isolated"
 
 # Unknown trust token → exit 2 with a clear message (no VM build attempted).
 out=$("$vm" run --trust bogus smoke true 2>&1); rc=$?
@@ -56,7 +62,7 @@ out=$("$vm" run --trust bogus smoke true 2>&1); rc=$?
 
 # Command tokens after the name are not swallowed by the trust parser (dashes stay in the command).
 out=$(VM_DEBUG_GRANT=1 "$vm" run --trusted smoke echo --isolated hi 2>&1); rc=$?
-{ [ "$rc" = 0 ] && grep -q 'grant: secrets' <<<"$out"; } && ok "trust flag before name only; cmd dashes preserved" || bad "cmd dash handling"
+{ [ "$rc" = 0 ] && grep -qx 'grant: secrets agent' <<<"$out"; } && ok "trust flag before name only; cmd dashes preserved" || bad "cmd dash handling"
 
 echo "── nix-vm CLI suite: $pass passed, $fail failed ──"
 [ "$fail" = 0 ]

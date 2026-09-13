@@ -10,7 +10,8 @@ Key properties:
 - **Read-only store base** shared across instances: the host `/nix/store` via virtiofs (`storeBacking =
   "host"`, default — no per-VM store build) or a per-VM EROFS image (`storeBacking = "image"`).
 - **Optional forwarded SSH agent** over virtio-vsock (`forwardSshAgent`, default on) — tool-agnostic,
-  forwards the host's `$SSH_AUTH_SOCK`; no private keys stored in the VM.
+  forwards the host's `$SSH_AUTH_SOCK`; no private keys stored in the VM. Gated per launch by the
+  `agent` trust token (see *Launch-time trust*).
 - Optional per-VM virtiofs shares (`extraShares`, read-write, opt-in).
 - Full home-manager user layer (darwin-only items no-op on Linux).
 
@@ -53,19 +54,22 @@ wiped on exit. Run `vm up <name>` in several terminals for concurrent instances.
 
 ### Launch-time trust
 
-Sandboxes are **isolated by default**: declared `secrets` are withheld unless the launch grants
-them. A trust flag precedes `<name>`:
+Sandboxes are **isolated by default**: declared `secrets` are withheld and the host SSH agent is
+not forwarded unless the launch grants them. A trust flag precedes `<name>`:
 
 ```bash
-vm run --trust secrets <name> <cmd…>   # inject the declared secrets this launch
-vm run --trusted       <name> <cmd…>   # grant every capability the VM declares (currently: secrets)
-vm run --isolated      <name> <cmd…>   # grant nothing (overrides the VM's default)
-vm run                 <name> <cmd…>   # use the VM's trust.default (defaults to nothing)
+vm run --trust secrets,agent <name> <cmd…>   # inject secrets and forward the host SSH agent
+vm run --trust agent         <name> <cmd…>   # forward the agent only (e.g. git over SSH, no creds)
+vm run --trusted             <name> <cmd…>   # grant every capability the VM declares (secrets + agent)
+vm run --isolated            <name> <cmd…>   # grant nothing (overrides the VM's default)
+vm run                       <name> <cmd…>   # use the VM's trust.default (defaults to nothing)
 ```
 
-Trust resolution: **CLI flag › per-VM `trust.default` › `[]`**. A long-term / pre-configured VM
-sets `trust.default = [ "secrets" ]` so its secrets inject without a flag. Tokens today: `secrets`
-(the SSH agent and `extraShares` are still build-time settings — not yet launch-gated).
+Trust resolution: **CLI flag › per-VM `trust.default` › `[]`**. Tokens: `secrets` (inject declared
+secrets) and `agent` (forward the host `$SSH_AUTH_SOCK`). A VM that clones over SSH at first boot
+(`home.gitClone`) needs `agent` in its `trust.default`. `extraShares` are still a build-time
+setting — not yet launch-gated. `vm doctor` never resurrects the bridge of a VM launched without
+`agent` (it reads the launch grant persisted at `~/.local/state/microvm/<name>/.launch-grant`).
 
 ---
 
@@ -103,7 +107,7 @@ Per-instance (ephemeral): `~/.local/state/microvm/<name>/run.<pid>.<rand>/` hold
 | `persistent` | `false` | Ephemeral+concurrent vs persistent single-instance (lock-guarded) |
 | `homeBacking` | `auto` | `tmpfs` / `disk` / `auto` (tmpfs when `mem > 2*homeSize`) |
 | `storeBacking` | `host` | `host` = share host `/nix/store` (ro, fast); `image` = per-VM EROFS |
-| `forwardSshAgent` | `true` | Forward the host `$SSH_AUTH_SOCK` over virtio-vsock |
+| `forwardSshAgent` | `true` | Build the guest with SSH-agent forwarding wired up. The bridge is started only when the launch also grants the `agent` trust token (see *Launch-time trust*); `false` disables it entirely. |
 | `vsockPort` | *(auto: 20000–29999)* | Host-side vsock port / guest CID for the forwarded agent. Auto-derived from the VM name when `forwardSshAgent`; set explicitly to pin. Must be unique among a host's VMs (asserted). |
 | `guestSSH.enable` | `false` | Run sshd in the guest for host→guest debugging (usermode NAT → reach via a host port-forward) |
 | `guestSSH.authorizedKeys` | `[]` | Public keys authorized for the guest user's sshd |
@@ -127,7 +131,7 @@ Per-instance (ephemeral): `~/.local/state/microvm/<name>/run.<pid>.<rand>/` hold
 | `vfkitExtraArgs` | `[]` | Extra vfkit CLI arguments |
 | `extraModules` | `[]` | Extra guest NixOS modules (packages, overlays, services) |
 | `hostPreLaunch` | `""` | Host shell run in the instance dir before launch (secret/mount hooks) |
-| `trust.default` | `[]` | Capabilities granted when launched with no trust flag (tokens: `secrets`). `[]` = isolated; set `[ "secrets" ]` to inject declared secrets by default. Overridden per launch by `--trusted`/`--isolated`/`--trust`. |
+| `trust.default` | `[]` | Capabilities granted when launched with no trust flag (tokens: `secrets`, `agent`). `[]` = isolated; e.g. `[ "secrets" "agent" ]` injects declared secrets and forwards the host agent by default. Overridden per launch by `--trusted`/`--isolated`/`--trust`. |
 | `secrets` | `[]` | Secrets fetched from KeePassXC at launch and injected into the guest (see below) |
 | `keepassxcCli` | *(per-OS)* | `keepassxc-cli` binary on the host (macOS app-bundle path / `keepassxc-cli` on PATH for Linux) |
 
