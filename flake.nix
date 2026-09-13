@@ -415,6 +415,9 @@
               {
                 custom.username = "tester";
                 custom.microvms.smoke.vsockPort = 9999;
+                # Grants secrets by default so the CLI suite can assert default trust resolution
+                # (= secrets) and that --isolated overrides it (= none).
+                custom.microvms.smoke.trust.default = [ "secrets" ];
                 # A secret forces the host-side staging into the baked `nix-vm` wrapper. On a
                 # Linux host this exercises the secret-tool branch (bash -n via writeShellScriptBin).
                 custom.microvms.smoke.secrets = [
