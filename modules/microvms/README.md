@@ -39,17 +39,33 @@ These modules are input-free; the consuming flake passes its own inputs via `spe
 ## Usage
 
 ```bash
-vm up     <name>          # start VM (forwards the host SSH agent, attaches serial console)
-vm run    <name> <cmd…>   # boot headless, run a command, stream output, propagate exit code
-vm test   <name> [secs]   # headless smoke-test: boot to multi-user then tear down (exit 0 = pass)
-vm down   <name>          # tear down agent bridge (poweroff inside the VM to stop it)
-vm list                   # show defined VMs
-vm build  <name>          # pre-build the guest image
-vm doctor [name…]         # verify / self-heal the SSH-agent bridge of running VM(s)
+vm up     [trust] <name>          # start VM (attaches serial console)
+vm run    [trust] <name> <cmd…>   # boot headless, run a command, stream output, propagate exit code
+vm test   <name> [secs]           # headless smoke-test: boot to multi-user then tear down (exit 0 = pass)
+vm down   <name>                  # tear down agent bridge (poweroff inside the VM to stop it)
+vm list                           # show defined VMs
+vm build  <name>                  # pre-build the guest image
+vm doctor [name…]                 # verify / self-heal the SSH-agent bridge of running VM(s)
 ```
 
 `vm up` runs in the foreground (serial console). Type `poweroff` inside to stop; ephemeral state is
 wiped on exit. Run `vm up <name>` in several terminals for concurrent instances.
+
+### Launch-time trust
+
+Sandboxes are **isolated by default**: declared `secrets` are withheld unless the launch grants
+them. A trust flag precedes `<name>`:
+
+```bash
+vm run --trust secrets <name> <cmd…>   # inject the declared secrets this launch
+vm run --trusted       <name> <cmd…>   # grant every capability the VM declares (currently: secrets)
+vm run --isolated      <name> <cmd…>   # grant nothing (overrides the VM's default)
+vm run                 <name> <cmd…>   # use the VM's trust.default (defaults to nothing)
+```
+
+Trust resolution: **CLI flag › per-VM `trust.default` › `[]`**. A long-term / pre-configured VM
+sets `trust.default = [ "secrets" ]` so its secrets inject without a flag. Tokens today: `secrets`
+(the SSH agent and `extraShares` are still build-time settings — not yet launch-gated).
 
 ---
 
@@ -111,6 +127,7 @@ Per-instance (ephemeral): `~/.local/state/microvm/<name>/run.<pid>.<rand>/` hold
 | `vfkitExtraArgs` | `[]` | Extra vfkit CLI arguments |
 | `extraModules` | `[]` | Extra guest NixOS modules (packages, overlays, services) |
 | `hostPreLaunch` | `""` | Host shell run in the instance dir before launch (secret/mount hooks) |
+| `trust.default` | `[]` | Capabilities granted when launched with no trust flag (tokens: `secrets`). `[]` = isolated; set `[ "secrets" ]` to inject declared secrets by default. Overridden per launch by `--trusted`/`--isolated`/`--trust`. |
 | `secrets` | `[]` | Secrets fetched from KeePassXC at launch and injected into the guest (see below) |
 | `keepassxcCli` | *(per-OS)* | `keepassxc-cli` binary on the host (macOS app-bundle path / `keepassxc-cli` on PATH for Linux) |
 
@@ -125,8 +142,10 @@ Built-in behaviour (no consumer wiring needed):
 
 ## Secret injection (`secrets`)
 
-Works from a macOS or Linux control node. Each `vm up` fetches the declared KeePassXC entries,
-stages them in the per-instance working dir, and shares them into the guest at
+Works from a macOS or Linux control node. When the launch grants `secrets` (see *Launch-time
+trust* above — via `--trust secrets`/`--trusted`, or the VM's `trust.default`), `vm up`/`vm run`
+fetches the declared KeePassXC entries, stages them in the per-instance working dir, and shares
+them into the guest at
 `/run/injected-secrets` (the share is added automatically). A guest oneshot (`inject-secrets`,
 ordered after home-manager) places each secret at its target, then **deletes the host copy** —
 plaintext lives on host disk only until the guest reads it.

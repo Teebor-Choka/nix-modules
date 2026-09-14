@@ -26,6 +26,9 @@ let
   # Whether the host `vm` helper should bridge the SSH agent for each VM (name → 0|1)
   vmForwardAgentStr = bakeMap (spec: if spec.forwardSshAgent then "1" else "0");
   vmPersistentStr = bakeMap (spec: if spec.persistent then "1" else "0");
+  # Per-VM default trust grant (name → csv of tokens; empty = grant nothing). Quoted so an empty
+  # value or a multi-token csv survives the bash assoc-array literal.
+  vmTrustDefaultStr = bakeMap (spec: ''"${concatStringsSep "," spec.trust.default}"'');
 
   # Platform-derived home directory prefix for option defaults
   homePrefix = if pkgs.stdenv.isDarwin then "/Users" else "/home";
@@ -400,6 +403,22 @@ let
         '';
       };
 
+      # ── Launch-time trust ─────────────────────────────────────────────────────
+      # What this VM is granted when `vm up/run` is invoked with no trust flag. Sandboxes are
+      # isolated by default ([] = grant nothing); a launch flag (--trusted/--isolated/--trust)
+      # overrides this. Long-term / pre-configured VMs set a default so common workflows need no
+      # flag. Task-1 token set = { secrets }; agent/shares forwarding stays build-time for now.
+      trust.default = mkOption {
+        type = types.listOf (types.enum [ "secrets" ]);
+        default = [ ];
+        description = ''
+          Capabilities granted to this VM when launched without a trust flag. `[]` (default) grants
+          nothing — secrets are withheld unless `vm run --trust secrets` (or `--trusted`) is passed.
+          Set `[ "secrets" ]` on a VM whose declared secrets should inject by default.
+        '';
+        example = literalExpression ''[ "secrets" ]'';
+      };
+
       # ── Secret injection (KeePassXC → virtiofs → guest) ───────────────────────
       # When non-empty, the host stages each secret before launch and the guest places it
       # at its target then wipes the host copy (see secrets.nix). The /run/injected-secrets
@@ -473,9 +492,18 @@ let
     mapAttrsToList (
       name: spec:
       let
+        # Secret staging is gated on the launch-time grant ($GRANT, set by vm_up/vm_run). When
+        # `secrets` is not granted, nothing is staged and the guest's inject-secrets no-ops.
+        secretsBlock = optionalString (spec.secrets != [ ]) ''
+          if _in_list secrets $GRANT; then
+          ${mkSecretsHook spec}
+          else
+            echo "→ secrets withheld from ${name} (not trusted this launch)"
+          fi
+        '';
         combined = concatStringsSep "\n" (
           filter (s: s != "") [
-            (optionalString (spec.secrets != [ ]) (mkSecretsHook spec))
+            secretsBlock
             spec.hostPreLaunch
           ]
         );
@@ -562,6 +590,35 @@ in
           # Per-VM SSH-agent forwarding (1 = bridge the host agent, 0 = skip)
           declare -A VM_FORWARD_AGENT=(${vmForwardAgentStr})
 
+          # Per-VM default trust grant (name → csv of tokens; empty = grant nothing at launch)
+          declare -A VM_TRUST_DEFAULT=(${vmTrustDefaultStr})
+
+          # Trust tokens the launcher can grant (task 1: secrets only; agent/shares are build-time).
+          VALID_TRUST_TOKENS="secrets"
+          # Resolved launch grant (space-separated tokens); set per launch by vm_up/vm_run, read by
+          # the secret-staging dispatch in _vm_prepare. Init empty so `set -u` never trips on it.
+          GRANT=""
+
+          # Space-list membership test: _in_list <needle> <item…>
+          _in_list() { local n=$1; shift; local x; for x in $*; do [ "$x" = "$n" ] && return 0; done; return 1; }
+
+          # Resolve the launch grant. $1 mode(trusted|isolated|set|default) $2 csv(for set) $3 vm-default csv.
+          # Echoes the normalized space-separated grant; exits 2 on an unknown token in a --trust csv.
+          _resolve_grant() {
+            local mode=$1 csv=$2 def=$3 out="" t
+            case "$mode" in
+              trusted)  out="$VALID_TRUST_TOKENS" ;;
+              isolated) out="" ;;
+              set)
+                for t in ''${csv//,/ }; do
+                  _in_list "$t" $VALID_TRUST_TOKENS || {
+                    echo "✗ unknown trust token: '$t' (valid: ''${VALID_TRUST_TOKENS// /, })" >&2; return 2; }
+                  _in_list "$t" $out || out="''${out:+$out }$t"
+                done ;;
+              default)  out="''${def//,/ }" ;;
+            esac
+            printf '%s' "$out"
+          }
 
           usage() {
             cat <<'EOF'
@@ -569,8 +626,13 @@ in
 
           Commands:
             build <name>          Build VM guest image (run before first up, or after rebuild)
-            up    <name>          Start VM interactively (attaches console, forwards SSH agent)
-            run   <name> <cmd…>   Boot headlessly, run a command, stream output, return exit code
+            up    [trust] <name>          Start VM interactively (attaches console, forwards SSH agent)
+            run   [trust] <name> <cmd…>   Boot headlessly, run a command, stream output, return exit code
+
+          Trust flags (before <name>; isolated by default — secrets withheld unless granted):
+            --trusted             Grant every capability this VM declares (currently: secrets)
+            --isolated            Grant nothing (overrides the VM's default trust)
+            --trust <a,b>         Grant an explicit set (tokens: secrets)
             test  <name> [secs]   Headless smoke-test: boot to multi-user then tear down (exit 0=pass)
             down  <name>          Stop the shared SSH-agent bridge for a VM
             list                  Show defined VMs and bridge status
@@ -702,12 +764,34 @@ in
           }
 
           vm_up() {
-            local name=''${1:?'Usage: vm up <name>'}
+            local mode=default csv=""
+            # A PTY re-exec (below) carries the already-resolved grant via env; skip re-parsing then.
+            if [ "''${VM_GRANT_OVERRIDE_SET:-}" = 1 ]; then
+              GRANT="''${VM_GRANT_OVERRIDE:-}"
+            else
+              while [ $# -gt 0 ]; do
+                case "$1" in
+                  --trusted)  mode=trusted;  shift ;;
+                  --isolated) mode=isolated; shift ;;
+                  --trust)    mode=set; csv=''${2:?'--trust needs a comma-separated token list'}; shift 2 ;;
+                  --trust=*)  mode=set; csv=''${1#--trust=}; shift ;;
+                  --)         shift; break ;;
+                  -*)         echo "✗ unknown option: $1" >&2; return 2 ;;
+                  *)          break ;;
+                esac
+              done
+            fi
+            local name=''${1:?'Usage: vm up [--trusted|--isolated|--trust <csv>] <name>'}
+            if [ "''${VM_GRANT_OVERRIDE_SET:-}" != 1 ]; then
+              GRANT=$(_resolve_grant "$mode" "$csv" "''${VM_TRUST_DEFAULT[$name]:-}") || return 2
+            fi
+            if [ "''${VM_DEBUG_GRANT:-}" = 1 ]; then echo "grant: ''${GRANT:-<none>}"; return 0; fi
             # vfkit's virtio-serial,stdio requires a real TTY. Re-exec through a PTY when stdin is not one.
             if [ "$OS" = "Darwin" ] && ! [ -t 0 ]; then
               command -v python3 >/dev/null 2>&1 \
                 || { echo "✗ vm up needs python3 to allocate a PTY (vfkit requires a TTY for the serial console)" >&2; return 2; }
-              exec python3 -c 'import pty,sys; pty.spawn(sys.argv[1:])' "$0" up "$name"
+              exec env VM_GRANT_OVERRIDE="$GRANT" VM_GRANT_OVERRIDE_SET=1 \
+                python3 -c 'import pty,sys; pty.spawn(sys.argv[1:])' "$0" up "$name"
             fi
             _vm_prepare "$name" || return ''${?}
             if [ "''${VM_PERSISTENT[$name]:-0}" = 1 ]; then
@@ -719,9 +803,23 @@ in
           }
 
           vm_run() {
-            local name=''${1:?'Usage: vm run <name> <command…>'}
+            local mode=default csv=""
+            while [ $# -gt 0 ]; do
+              case "$1" in
+                --trusted)  mode=trusted;  shift ;;
+                --isolated) mode=isolated; shift ;;
+                --trust)    mode=set; csv=''${2:?'--trust needs a comma-separated token list'}; shift 2 ;;
+                --trust=*)  mode=set; csv=''${1#--trust=}; shift ;;
+                --)         shift; break ;;
+                -*)         echo "✗ unknown option: $1" >&2; return 2 ;;
+                *)          break ;;
+              esac
+            done
+            local name=''${1:?'Usage: vm run [--trusted|--isolated|--trust <csv>] <name> <command…>'}
             shift
             local cmd="$*"
+            GRANT=$(_resolve_grant "$mode" "$csv" "''${VM_TRUST_DEFAULT[$name]:-}") || return 2
+            if [ "''${VM_DEBUG_GRANT:-}" = 1 ]; then echo "grant: ''${GRANT:-<none>}"; return 0; fi
             [ -n "$cmd" ] || { echo "✗ vm run: command required" >&2; return 2; }
             command -v python3 >/dev/null 2>&1 || { echo "✗ vm run needs python3 (console driver)" >&2; return 2; }
             _vm_prepare "$name" || return ''${?}
@@ -849,8 +947,8 @@ in
 
           case "''${1:-}" in
             build) vm_build "''${2:?'Usage: vm build <name>'}"; ;;
-            up)    vm_up   "''${2:?'Usage: vm up <name>'}"; ;;
-            run)   vm_run  "''${2:?'Usage: vm run <name> <command…>'}" "''${@:3}"; ;;
+            up)    shift; vm_up  "$@"; ;;
+            run)   shift; vm_run "$@"; ;;
             test)  vm_test "''${2:?'Usage: vm test <name> [timeout_s]'}" "''${3:-}"; ;;
             down)  vm_down "''${2:?'Usage: vm down <name>'}"; ;;
             list)  vm_list; ;;
