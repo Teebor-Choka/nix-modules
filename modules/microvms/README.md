@@ -40,13 +40,13 @@ These modules are input-free; the consuming flake passes its own inputs via `spe
 ## Usage
 
 ```bash
-vm up     [trust] <name>          # start VM (attaches serial console)
-vm run    [trust] <name> <cmd…>   # boot headless, run a command, stream output, propagate exit code
-vm test   <name> [secs]           # headless smoke-test: boot to multi-user then tear down (exit 0 = pass)
-vm down   <name>                  # tear down agent bridge (poweroff inside the VM to stop it)
-vm list                           # show defined VMs
-vm build  <name>                  # pre-build the guest image
-vm doctor [name…]                 # verify / self-heal the SSH-agent bridge of running VM(s)
+vm up     [opts] <name>          # start VM (attaches serial console)
+vm run    [opts] <name> <cmd…>   # boot headless, run a command, stream output, propagate exit code
+vm test   <name> [secs]          # headless smoke-test: boot to multi-user then tear down (exit 0 = pass)
+vm down   <name>                 # tear down agent bridge (poweroff inside the VM to stop it)
+vm list                          # show defined VMs
+vm build  <name>                 # pre-build the guest image
+vm doctor [name…]                # verify / self-heal the SSH-agent bridge of running VM(s)
 ```
 
 `vm up` runs in the foreground (serial console). Type `poweroff` inside to stop; ephemeral state is
@@ -70,6 +70,25 @@ secrets) and `agent` (forward the host `$SSH_AUTH_SOCK`). A VM that clones over 
 (`home.gitClone`) needs `agent` in its `trust.default`. `extraShares` are still a build-time
 setting — not yet launch-gated. `vm doctor` never resurrects the bridge of a VM launched without
 `agent` (it reads the launch grant persisted at `~/.local/state/microvm/<name>/.launch-grant`).
+
+### Ad-hoc launch inputs (`--env`, `--mount`)
+
+Pass one-off inputs at launch without editing the flake — the e2b-style "create a sandbox, give it
+this env and this directory, run" flow:
+
+```bash
+vm run --env KEY=VALUE <name> <cmd…>          # export KEY for the command (repeatable; run only)
+vm run --mount ./project <name> 'cd /mnt/host && …'   # share a host dir at /mnt/host (RW, this launch)
+vm run --env TOKEN=… --mount ./repo --trust agent <name> <cmd…>   # combine freely
+```
+
+- `--env` prepends `export`s to the command's shell (so children inherit them); it is a `vm run`
+  option only (`vm up` is an interactive login). Values are shell-quoted; the key must be a valid
+  identifier.
+- `--mount <hostdir>` shares that directory into the guest at **/mnt/host** for the single launch,
+  read-write. Without `--mount` the slot is an empty per-instance dir, so nothing is exposed —
+  isolated by default. Requires the VM to have the slot (`launchMount = true`, the default); set
+  `launchMount = false` to omit it, after which `--mount` is rejected.
 
 ---
 
@@ -126,6 +145,7 @@ Per-instance (ephemeral): `~/.local/state/microvm/<name>/run.<pid>.<rand>/` hold
 | `hmModules` | `[home-manager/home.nix]` | Base home-manager modules |
 | `extraHmModules` | `[]` | Per-VM home-manager layer |
 | `extraShares` | `[]` | Virtiofs shares `[{ source, mountPoint, tag? }]` |
+| `launchMount` | `true` | Give the VM a launch-mount slot at `/mnt/host` for `vm run --mount <dir>` (empty/isolated unless `--mount` is passed). `false` omits the slot and rejects `--mount`. |
 | `sshConfig` | `""` | Extra `~/.ssh/config` blocks |
 | `sshPubKeys` | `{}` | Public key files placed in `~/.ssh/` |
 | `vfkitExtraArgs` | `[]` | Extra vfkit CLI arguments |
