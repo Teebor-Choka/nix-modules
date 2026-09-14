@@ -233,16 +233,24 @@ in
     serviceConfig = {
       Type = "simple";
       ExecStart =
-        let
-          # vfkit: TCP to host NAT gateway (192.168.65.1) — VSOCK relay broken in vfkit 0.6.x.
+        if vmSpec.hypervisor == "vfkit" then
+          # vfkit usermode NAT: TCP to this guest's DEFAULT GATEWAY (the host side of the vmnet
+          # bridge). The gateway subnet varies by vfkit/vmnet version — 192.168.64.1 on vfkit 0.6.x,
+          # 192.168.65.1 on earlier ones — so it must be read from the guest's route table, never
+          # hardcoded. (VSOCK relay is broken in vfkit 0.6.x, hence TCP.)
+          pkgs.writeShellScript "ssh-agent-bridge-vfkit" ''
+            for i in $(seq 60); do
+              gw=$(${pkgs.iproute2}/bin/ip route show default 2>/dev/null | ${pkgs.gawk}/bin/awk '{print $3; exit}')
+              [ -n "$gw" ] && break
+              sleep 1
+            done
+            [ -n "''${gw:-}" ] || { echo "ssh-agent-bridge: no default gateway found" >&2; exit 1; }
+            exec ${pkgs.socat}/bin/socat UNIX-LISTEN:/run/ssh-agent/agent.sock,fork,mode=0666 \
+              TCP:"$gw":${toString vmSpec.vsockPort}
+          ''
+        else
           # qemu: VSOCK-CONNECT to the host (CID 2) on the configured vsock port.
-          target =
-            if vmSpec.hypervisor == "vfkit" then
-              "TCP:192.168.65.1:${toString vmSpec.vsockPort}"
-            else
-              "VSOCK-CONNECT:2:${toString vmSpec.vsockPort}";
-        in
-        "${pkgs.socat}/bin/socat UNIX-LISTEN:/run/ssh-agent/agent.sock,fork,mode=0666 ${target}";
+          "${pkgs.socat}/bin/socat UNIX-LISTEN:/run/ssh-agent/agent.sock,fork,mode=0666 VSOCK-CONNECT:2:${toString vmSpec.vsockPort}";
       Restart = "on-failure";
       RestartSec = "5s";
       RuntimeDirectory = "ssh-agent";
