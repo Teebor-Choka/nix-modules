@@ -99,5 +99,23 @@ out=$("$vm" run --mount /no/such/dir/xyz smoke true 2>&1); rc=$?
 out=$("$vm" up --env X=1 smoke 2>&1); rc=$?
 { [ "$rc" = 2 ] && grep -qi "only on 'vm run'" <<<"$out"; } && ok "up --env → rejected (run only)" || bad "up env reject"
 
+# ── Launch resource overrides: --cpu / --mem ───────────────────────────────────
+out=$(VM_DEBUG_GRANT=1 "$vm" run --cpu 4 --mem 2048 smoke true 2>&1); rc=$?
+{ [ "$rc" = 0 ] && grep -qx 'cpu: 4' <<<"$out" && grep -qx 'mem: 2048' <<<"$out"; } \
+  && ok "--cpu/--mem → resolved overrides" || bad "cpu/mem override"
+
+out=$(VM_DEBUG_GRANT=1 "$vm" run smoke true 2>&1); rc=$?
+{ [ "$rc" = 0 ] && grep -qx 'cpu: <default>' <<<"$out" && grep -qx 'mem: <default>' <<<"$out"; } \
+  && ok "no --cpu/--mem → defaults kept" || bad "cpu/mem default"
+
+out=$(VM_DEBUG_GRANT=1 "$vm" up --cpu 8 smoke 2>&1); rc=$?
+{ [ "$rc" = 0 ] && grep -qx 'cpu: 8' <<<"$out"; } && ok "up --cpu → resolved" || bad "up cpu"
+
+out=$("$vm" run --cpu 0 smoke true 2>&1); rc=$?
+{ [ "$rc" = 2 ] && grep -qi 'must be > 0' <<<"$out"; } && ok "--cpu 0 → exit 2" || bad "cpu zero"
+
+out=$("$vm" run --mem abc smoke true 2>&1); rc=$?
+{ [ "$rc" = 2 ] && grep -qi 'positive integer' <<<"$out"; } && ok "--mem non-numeric → exit 2" || bad "mem nan"
+
 echo "── nix-vm CLI suite: $pass passed, $fail failed ──"
 [ "$fail" = 0 ]
