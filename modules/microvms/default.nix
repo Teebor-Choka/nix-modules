@@ -407,16 +407,24 @@ let
       # What this VM is granted when `vm up/run` is invoked with no trust flag. Sandboxes are
       # isolated by default ([] = grant nothing); a launch flag (--trusted/--isolated/--trust)
       # overrides this. Long-term / pre-configured VMs set a default so common workflows need no
-      # flag. Task-1 token set = { secrets }; agent/shares forwarding stays build-time for now.
+      # flag. Tokens: `secrets` (inject declared secrets) and `agent` (forward the host SSH agent).
+      # `extraShares` forwarding stays build-time for now.
       trust.default = mkOption {
-        type = types.listOf (types.enum [ "secrets" ]);
+        type = types.listOf (
+          types.enum [
+            "secrets"
+            "agent"
+          ]
+        );
         default = [ ];
         description = ''
           Capabilities granted to this VM when launched without a trust flag. `[]` (default) grants
-          nothing — secrets are withheld unless `vm run --trust secrets` (or `--trusted`) is passed.
-          Set `[ "secrets" ]` on a VM whose declared secrets should inject by default.
+          nothing — secrets are withheld and the host SSH agent is not forwarded unless the launch
+          grants them (`vm run --trust secrets,agent`, or `--trusted`). Set e.g. `[ "secrets" "agent" ]`
+          on a VM that should inject its declared secrets and reach the host agent by default. A VM
+          that clones over SSH at first boot (home.gitClone) needs `agent` here.
         '';
-        example = literalExpression ''[ "secrets" ]'';
+        example = literalExpression ''[ "secrets" "agent" ]'';
       };
 
       # ── Secret injection (KeePassXC → virtiofs → guest) ───────────────────────
@@ -593,8 +601,9 @@ in
           # Per-VM default trust grant (name → csv of tokens; empty = grant nothing at launch)
           declare -A VM_TRUST_DEFAULT=(${vmTrustDefaultStr})
 
-          # Trust tokens the launcher can grant (task 1: secrets only; agent/shares are build-time).
-          VALID_TRUST_TOKENS="secrets"
+          # Trust tokens the launcher can grant (secret injection + SSH-agent forwarding; extraShares
+          # are still build-time).
+          VALID_TRUST_TOKENS="secrets agent"
           # Resolved launch grant (space-separated tokens); set per launch by vm_up/vm_run, read by
           # the secret-staging dispatch in _vm_prepare. Init empty so `set -u` never trips on it.
           GRANT=""
@@ -626,13 +635,13 @@ in
 
           Commands:
             build <name>          Build VM guest image (run before first up, or after rebuild)
-            up    [trust] <name>          Start VM interactively (attaches console, forwards SSH agent)
+            up    [trust] <name>          Start VM interactively (attaches serial console)
             run   [trust] <name> <cmd…>   Boot headlessly, run a command, stream output, return exit code
 
-          Trust flags (before <name>; isolated by default — secrets withheld unless granted):
-            --trusted             Grant every capability this VM declares (currently: secrets)
+          Trust flags (before <name>; isolated by default — nothing granted unless asked):
+            --trusted             Grant every capability this VM declares (secrets + agent)
             --isolated            Grant nothing (overrides the VM's default trust)
-            --trust <a,b>         Grant an explicit set (tokens: secrets)
+            --trust <a,b>         Grant an explicit set (tokens: secrets, agent)
             test  <name> [secs]   Headless smoke-test: boot to multi-user then tear down (exit 0=pass)
             down  <name>          Stop the shared SSH-agent bridge for a VM
             list                  Show defined VMs and bridge status
@@ -655,6 +664,9 @@ in
             local name=''${1:?} base_dir=''${2:?}
             local port="''${VM_VSOCK_PORTS[$name]:?'Unknown VM: use vm list'}"
             [ "''${VM_FORWARD_AGENT[$name]:-1}" = 1 ] || return 0
+            # Launch-time trust: bridge the host agent only when `agent` is granted this launch.
+            # ($GRANT is the launch grant; vm_doctor sets it from the persisted per-VM .launch-grant.)
+            _in_list agent "$GRANT" || { echo "→ SSH agent withheld from $name (not trusted this launch)"; return 0; }
             if [ -z "''${SSH_AUTH_SOCK:-}" ]; then
               echo "⚠  SSH_AUTH_SOCK not set — agent forwarding disabled"
               return 0
@@ -735,6 +747,9 @@ in
             ' EXIT INT TERM
 
             mkdir -p "$base_dir"
+            # Persist this launch's grant so `vm doctor` can honour the same agent trust when it
+            # later repairs the (per-VM, shared) bridge. Reflects the most recent launch of the VM.
+            printf '%s' "$GRANT" > "$base_dir/.launch-grant"
             _ensure_agent_bridge "$name" "$base_dir"
 
             # Consumer host hook (credential staging, etc.); runs with CWD = INST_DIR and $name set.
@@ -931,6 +946,9 @@ in
                 if [ -z "$port" ]; then echo "· $name: agent forwarding off — skip"; continue; fi
                 if ! _vm_running "$name"; then echo "· $name: not running — skip"; continue; fi
                 local base_dir="$HOME/.local/state/microvm/$name"
+                # Honour the launch grant: never resurrect a bridge for a VM launched without `agent`.
+                GRANT=$(cat "$base_dir/.launch-grant" 2>/dev/null || echo "")
+                if ! _in_list agent "$GRANT"; then echo "· $name: SSH agent withheld at launch — skip"; continue; fi
                 if _bridge_bound "$port"; then
                   echo "✓ $name: bridge healthy (192.168.65.1:$port)"
                 else
