@@ -34,15 +34,16 @@ out=$("$vm" builder status 2>&1); rc=$?
 { [ "$rc" = 1 ] && grep -qi 'macOS-only' <<<"$out"; } && ok "builder → macOS-only error on Linux" || bad "builder gate"
 
 # ── Launch-time trust resolution (VM_DEBUG_GRANT prints the grant and exits before any build) ──
-# The 'smoke' VM declares trust.default = [ "secrets" "agent" ]. Matches are exact-line (grep -x).
+# The 'smoke' VM declares trust.default = [ "secrets" "agent" "shares" ] + defaultMount = /tmp.
+# Matches are exact-line (grep -x).
 out=$(VM_DEBUG_GRANT=1 "$vm" run smoke true 2>&1); rc=$?
-{ [ "$rc" = 0 ] && grep -qx 'grant: secrets agent' <<<"$out"; } && ok "run smoke → default grant = secrets agent" || bad "default grant"
+{ [ "$rc" = 0 ] && grep -qx 'grant: secrets agent shares' <<<"$out"; } && ok "run smoke → default grant = secrets agent shares" || bad "default grant"
 
 out=$(VM_DEBUG_GRANT=1 "$vm" run --isolated smoke true 2>&1); rc=$?
 { [ "$rc" = 0 ] && grep -qx 'grant: <none>' <<<"$out"; } && ok "run --isolated → grant none (overrides default)" || bad "isolated override"
 
 out=$(VM_DEBUG_GRANT=1 "$vm" run --trusted smoke true 2>&1); rc=$?
-{ [ "$rc" = 0 ] && grep -qx 'grant: secrets agent' <<<"$out"; } && ok "run --trusted → all tokens" || bad "trusted grant"
+{ [ "$rc" = 0 ] && grep -qx 'grant: secrets agent shares' <<<"$out"; } && ok "run --trusted → all tokens" || bad "trusted grant"
 
 out=$(VM_DEBUG_GRANT=1 "$vm" run --trust secrets smoke true 2>&1); rc=$?
 { [ "$rc" = 0 ] && grep -qx 'grant: secrets' <<<"$out"; } && ok "run --trust secrets → secrets only" || bad "explicit secrets"
@@ -62,7 +63,17 @@ out=$("$vm" run --trust bogus smoke true 2>&1); rc=$?
 
 # Command tokens after the name are not swallowed by the trust parser (dashes stay in the command).
 out=$(VM_DEBUG_GRANT=1 "$vm" run --trusted smoke echo --isolated hi 2>&1); rc=$?
-{ [ "$rc" = 0 ] && grep -qx 'grant: secrets agent' <<<"$out"; } && ok "trust flag before name only; cmd dashes preserved" || bad "cmd dash handling"
+{ [ "$rc" = 0 ] && grep -qx 'grant: secrets agent shares' <<<"$out"; } && ok "trust flag before name only; cmd dashes preserved" || bad "cmd dash handling"
+
+# ── Default mount via the `shares` token (smoke.defaultMount = /tmp) ────────────
+out=$(VM_DEBUG_GRANT=1 "$vm" run smoke true 2>&1); rc=$?
+{ [ "$rc" = 0 ] && grep -qx 'mount: /tmp' <<<"$out"; } && ok "shares granted → defaultMount applied" || bad "default mount applied"
+
+out=$(VM_DEBUG_GRANT=1 "$vm" run --isolated smoke true 2>&1); rc=$?
+{ [ "$rc" = 0 ] && grep -qx 'mount: <none>' <<<"$out"; } && ok "--isolated → defaultMount withheld" || bad "default mount isolated"
+
+out=$(VM_DEBUG_GRANT=1 "$vm" run --trust secrets smoke true 2>&1); rc=$?
+{ [ "$rc" = 0 ] && grep -qx 'mount: <none>' <<<"$out"; } && ok "no shares token → defaultMount withheld" || bad "default mount no-shares"
 
 # ── Ad-hoc launch inputs: --env / --mount ──────────────────────────────────────
 out=$(VM_DEBUG_GRANT=1 "$vm" run --env FOO=bar smoke true 2>&1); rc=$?

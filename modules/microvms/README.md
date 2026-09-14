@@ -54,22 +54,24 @@ wiped on exit. Run `vm up <name>` in several terminals for concurrent instances.
 
 ### Launch-time trust
 
-Sandboxes are **isolated by default**: declared `secrets` are withheld and the host SSH agent is
-not forwarded unless the launch grants them. A trust flag precedes `<name>`:
+Sandboxes are **isolated by default**: declared `secrets` are withheld, the host SSH agent is not
+forwarded, and the VM's `defaultMount` is not mounted unless the launch grants them. A trust flag
+precedes `<name>`:
 
 ```bash
 vm run --trust secrets,agent <name> <cmd…>   # inject secrets and forward the host SSH agent
 vm run --trust agent         <name> <cmd…>   # forward the agent only (e.g. git over SSH, no creds)
-vm run --trusted             <name> <cmd…>   # grant every capability the VM declares (secrets + agent)
+vm run --trust shares        <name> <cmd…>   # mount the VM's defaultMount, nothing else
+vm run --trusted             <name> <cmd…>   # grant everything the VM declares (secrets+agent+shares)
 vm run --isolated            <name> <cmd…>   # grant nothing (overrides the VM's default)
 vm run                       <name> <cmd…>   # use the VM's trust.default (defaults to nothing)
 ```
 
 Trust resolution: **CLI flag › per-VM `trust.default` › `[]`**. Tokens: `secrets` (inject declared
-secrets) and `agent` (forward the host `$SSH_AUTH_SOCK`). A VM that clones over SSH at first boot
-(`home.gitClone`) needs `agent` in its `trust.default`. `extraShares` are still a build-time
-setting — not yet launch-gated. `vm doctor` never resurrects the bridge of a VM launched without
-`agent` (it reads the launch grant persisted at `~/.local/state/microvm/<name>/.launch-grant`).
+secrets), `agent` (forward the host `$SSH_AUTH_SOCK`), and `shares` (mount the VM's `defaultMount`).
+A VM that clones over SSH at first boot (`home.gitClone`) needs `agent` in its `trust.default`.
+`vm doctor` never resurrects the bridge of a VM launched without `agent` (it reads the launch grant
+persisted at `~/.local/state/microvm/<name>/.launch-grant`).
 
 ### Ad-hoc launch inputs (`--env`, `--mount`)
 
@@ -78,17 +80,22 @@ this env and this directory, run" flow:
 
 ```bash
 vm run --env KEY=VALUE <name> <cmd…>          # export KEY for the command (repeatable; run only)
-vm run --mount ./project <name> 'cd /mnt/host && …'   # share a host dir at /mnt/host (RW, this launch)
+vm run --mount ./project <name> 'cd /mnt/host && …'   # share a host dir at launchMountPoint (RW, this launch)
 vm run --env TOKEN=… --mount ./repo --trust agent <name> <cmd…>   # combine freely
 ```
 
 - `--env` prepends `export`s to the command's shell (so children inherit them); it is a `vm run`
   option only (`vm up` is an interactive login). Values are shell-quoted; the key must be a valid
   identifier.
-- `--mount <hostdir>` shares that directory into the guest at **/mnt/host** for the single launch,
-  read-write. Without `--mount` the slot is an empty per-instance dir, so nothing is exposed —
-  isolated by default. Requires the VM to have the slot (`launchMount = true`, the default); set
-  `launchMount = false` to omit it, after which `--mount` is rejected.
+- `--mount <hostdir>` shares that directory into the guest at **`launchMountPoint`** (default
+  `/mnt/host`) for the single launch, read-write. It **overrides `defaultMount`** for that launch.
+  Without `--mount` (and without the `shares` token pulling in `defaultMount`) the slot is an empty
+  per-instance dir, so nothing is exposed. Requires the slot (`launchMount = true`, the default);
+  `launchMount = false` omits it and rejects `--mount`.
+
+A VM can declare a **`defaultMount`** (host dir) that mounts automatically whenever the launch
+grants `shares` (typically via `trust.default`) — so `vm run <name> …` shares it with no flag,
+`vm run --mount <other> <name>` overrides it, and `vm run --isolated <name>` withholds it.
 
 ---
 
@@ -145,13 +152,15 @@ Per-instance (ephemeral): `~/.local/state/microvm/<name>/run.<pid>.<rand>/` hold
 | `hmModules` | `[home-manager/home.nix]` | Base home-manager modules |
 | `extraHmModules` | `[]` | Per-VM home-manager layer |
 | `extraShares` | `[]` | Virtiofs shares `[{ source, mountPoint, tag? }]` |
-| `launchMount` | `true` | Give the VM a launch-mount slot at `/mnt/host` for `vm run --mount <dir>` (empty/isolated unless `--mount` is passed). `false` omits the slot and rejects `--mount`. |
+| `launchMount` | `true` | Give the VM a launch-mount slot (at `launchMountPoint`) for `vm run --mount <dir>` and `defaultMount` (empty/isolated unless a source is provided). `false` omits the slot and rejects `--mount`. |
+| `launchMountPoint` | `/mnt/host` | Guest path where the launch-mount slot is mounted (RW). |
+| `defaultMount` | `null` | Host dir mounted (at `launchMountPoint`) when the `shares` token is granted. `--mount` overrides it; `--isolated` withholds it. Requires `launchMount = true`. |
 | `sshConfig` | `""` | Extra `~/.ssh/config` blocks |
 | `sshPubKeys` | `{}` | Public key files placed in `~/.ssh/` |
 | `vfkitExtraArgs` | `[]` | Extra vfkit CLI arguments |
 | `extraModules` | `[]` | Extra guest NixOS modules (packages, overlays, services) |
 | `hostPreLaunch` | `""` | Host shell run in the instance dir before launch (secret/mount hooks) |
-| `trust.default` | `[]` | Capabilities granted when launched with no trust flag (tokens: `secrets`, `agent`). `[]` = isolated; e.g. `[ "secrets" "agent" ]` injects declared secrets and forwards the host agent by default. Overridden per launch by `--trusted`/`--isolated`/`--trust`. |
+| `trust.default` | `[]` | Capabilities granted when launched with no trust flag (tokens: `secrets`, `agent`, `shares`). `[]` = isolated; e.g. `[ "secrets" "agent" "shares" ]` injects secrets, forwards the host agent, and mounts `defaultMount` by default. Overridden per launch by `--trusted`/`--isolated`/`--trust`. |
 | `secrets` | `[]` | Secrets fetched from KeePassXC at launch and injected into the guest (see below) |
 | `keepassxcCli` | *(per-OS)* | `keepassxc-cli` binary on the host (macOS app-bundle path / `keepassxc-cli` on PATH for Linux) |
 
