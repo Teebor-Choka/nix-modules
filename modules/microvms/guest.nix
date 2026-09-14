@@ -233,16 +233,24 @@ in
     serviceConfig = {
       Type = "simple";
       ExecStart =
-        let
-          # vfkit: TCP to host NAT gateway (192.168.65.1) — VSOCK relay broken in vfkit 0.6.x.
+        if vmSpec.hypervisor == "vfkit" then
+          # vfkit usermode NAT: TCP to this guest's DEFAULT GATEWAY (the host side of the vmnet
+          # bridge). The gateway subnet varies by vfkit/vmnet version — 192.168.64.1 on vfkit 0.6.x,
+          # 192.168.65.1 on earlier ones — so it must be read from the guest's route table, never
+          # hardcoded. (VSOCK relay is broken in vfkit 0.6.x, hence TCP.)
+          pkgs.writeShellScript "ssh-agent-bridge-vfkit" ''
+            for i in $(seq 60); do
+              gw=$(${pkgs.iproute2}/bin/ip route show default 2>/dev/null | ${pkgs.gawk}/bin/awk '{print $3; exit}')
+              [ -n "$gw" ] && break
+              sleep 1
+            done
+            [ -n "''${gw:-}" ] || { echo "ssh-agent-bridge: no default gateway found" >&2; exit 1; }
+            exec ${pkgs.socat}/bin/socat UNIX-LISTEN:/run/ssh-agent/agent.sock,fork,mode=0666 \
+              TCP:"$gw":${toString vmSpec.vsockPort}
+          ''
+        else
           # qemu: VSOCK-CONNECT to the host (CID 2) on the configured vsock port.
-          target =
-            if vmSpec.hypervisor == "vfkit" then
-              "TCP:192.168.65.1:${toString vmSpec.vsockPort}"
-            else
-              "VSOCK-CONNECT:2:${toString vmSpec.vsockPort}";
-        in
-        "${pkgs.socat}/bin/socat UNIX-LISTEN:/run/ssh-agent/agent.sock,fork,mode=0666 ${target}";
+          "${pkgs.socat}/bin/socat UNIX-LISTEN:/run/ssh-agent/agent.sock,fork,mode=0666 VSOCK-CONNECT:2:${toString vmSpec.vsockPort}";
       Restart = "on-failure";
       RestartSec = "5s";
       RuntimeDirectory = "ssh-agent";
@@ -255,12 +263,18 @@ in
     SSH_AUTH_SOCK = "/run/ssh-agent/agent.sock";
   };
 
-  # ssh-agent-bridge is Type=simple: systemd marks it "active" the moment socat forks,
-  # before the UNIX socket at /run/ssh-agent/agent.sock actually exists. home-manager
-  # activation may run home.gitClone (which needs SSH_AUTH_SOCK), so we interpose a oneshot
-  # "ready" service that polls until the socket appears, and order home-manager after it.
+  # ssh-agent-bridge is Type=simple: systemd marks it "active" the moment socat forks. But the
+  # UNIX socket existing does NOT mean the agent works: socat creates the listener immediately,
+  # while its relay to the host ($SSH_AUTH_SOCK over the vfkit NAT / vsock) may not be live yet.
+  # Querying a not-yet-live relay HANGS with no timeout — which stalls home.gitClone and, through
+  # it, the whole boot. So this gate waits for the agent to actually RESPOND (bounded), and
+  # home-manager (which runs home.gitClone) is ordered after it.
+  #
+  # It exits 0 either way: if the launch didn't grant `agent` there is no host relay, `ssh-add`
+  # just returns "cannot connect" and we proceed after the grace period (home.gitClone then
+  # fast-fails via its own timeout rather than hanging). Never blocks the boot.
   systemd.services.ssh-agent-bridge-ready = lib.mkIf vmSpec.forwardSshAgent {
-    description = "Wait for SSH agent bridge socket to be ready";
+    description = "Wait for the forwarded SSH agent to become responsive";
     after = [ "ssh-agent-bridge.service" ];
     requires = [ "ssh-agent-bridge.service" ];
     before = [ "home-manager-${vmSpec.user}.service" ];
@@ -268,13 +282,20 @@ in
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
+      Environment = "SSH_AUTH_SOCK=/run/ssh-agent/agent.sock";
       ExecStart = pkgs.writeShellScript "ssh-agent-bridge-wait" ''
-        for i in $(seq 30); do
-          [ -S /run/ssh-agent/agent.sock ] && exit 0
+        # Ready when `ssh-add -l` actually answers: rc 0 (keys) or 1 (responded, no keys). rc 2
+        # (relay not connectable yet) or a 3s timeout (relay hung) → keep waiting, up to 25s.
+        for i in $(seq 25); do
+          if [ -S "$SSH_AUTH_SOCK" ]; then
+            ${pkgs.coreutils}/bin/timeout 3 ${pkgs.openssh}/bin/ssh-add -l >/dev/null 2>&1
+            rc=$?
+            { [ "$rc" = 0 ] || [ "$rc" = 1 ]; } && exit 0
+          fi
           sleep 1
         done
-        echo "ssh-agent socket did not appear after 30s" >&2
-        exit 1
+        echo "ssh-agent bridge not responsive after 25s — continuing (SSH ops may fail this launch)" >&2
+        exit 0
       '';
     };
   };

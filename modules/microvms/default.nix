@@ -786,6 +786,19 @@ in
             printf '02:%s' "$(od -An -N5 -tx1 /dev/urandom | tr -d ' \n' | fold -w2 | paste -sd:)"
           }
 
+          # Host side of the vfkit usermode-NAT gateway = the vmnet bridge interface's inet address
+          # (which is the guest's default gateway). It varies by vfkit/vmnet version — 192.168.64.1
+          # on vfkit 0.6.x, 192.168.65.1 on earlier ones — so detect it instead of hardcoding.
+          # Prints the address, or fails (empty) until the bridge exists (cold start). Darwin only.
+          _vfkit_gateway() {
+            local b ip
+            for b in $(ifconfig -l 2>/dev/null | tr ' ' '\n' | grep -E '^bridge[0-9]+$'); do
+              ip=$(ifconfig "$b" 2>/dev/null | awk '/inet 192\.168\./{print $2; exit}')
+              [ -n "$ip" ] && { printf '%s' "$ip"; return 0; }
+            done
+            return 1
+          }
+
           # Ensure exactly one SSH-agent relay is running for a VM (shared across concurrent instances).
           # Pidfile lives in the base dir so the per-instance cleanup trap never kills it.
           _ensure_agent_bridge() {
@@ -808,14 +821,14 @@ in
                 echo "→ SSH-agent bridge already running (pid $(cat "$pid_file"))"
               else
                 if [ "$OS" = "Darwin" ]; then
-                  # vfkit user-mode NAT: host gateway 192.168.65.1; TCP relay (VSOCK broken in 0.6.x).
-                  # The gateway address only exists once a guest is running, so binding it at launch
-                  # time races the VM's network coming up (cold start ⇒ "Can't assign requested
-                  # address", relay dies, VM boots with no agent). Run socat in a background retry
-                  # loop: it binds as soon as the interface appears and re-establishes if the relay
-                  # later drops (e.g. host sleep/wake). `fork` serves concurrent guests on the port.
+                  # vfkit user-mode NAT: TCP relay bound to the detected vmnet bridge gateway (VSOCK
+                  # broken in 0.6.x). The gateway/interface only exists once a guest is running, so
+                  # _vfkit_gateway is empty at cold start; run socat in a background retry loop that
+                  # binds as soon as the bridge appears and re-establishes if the relay later drops
+                  # (e.g. host sleep/wake). `fork` serves concurrent guests on the port.
                   ( while :; do
-                      socat TCP-LISTEN:"$port",fork,bind=192.168.65.1,reuseaddr \
+                      gw=$(_vfkit_gateway) || { sleep 2; continue; }
+                      socat TCP-LISTEN:"$port",fork,bind="$gw",reuseaddr \
                             UNIX-CONNECT:"$SSH_AUTH_SOCK" 2>/dev/null
                       sleep 2
                     done ) &
@@ -1110,7 +1123,8 @@ in
           # Darwin = TCP relay on the vfkit NAT gateway; qemu/vsock has no cheap probe (assume ok).
           _bridge_bound() {
             [ "$OS" = "Darwin" ] || return 0
-            lsof -nP -iTCP@192.168.65.1:"$1" -sTCP:LISTEN >/dev/null 2>&1
+            local gw; gw=$(_vfkit_gateway) || return 1
+            lsof -nP -iTCP@"$gw":"$1" -sTCP:LISTEN >/dev/null 2>&1
           }
 
           # Verify — and self-heal — the SSH-agent bridge of running VM(s). The bridge is a bare
@@ -1136,10 +1150,11 @@ in
                 # Honour the launch grant: never resurrect a bridge for a VM launched without `agent`.
                 GRANT=$(cat "$base_dir/.launch-grant" 2>/dev/null || echo "")
                 if ! _in_list agent "$GRANT"; then echo "· $name: SSH agent withheld at launch — skip"; continue; fi
+                local gw; gw=$(_vfkit_gateway 2>/dev/null || echo '?')
                 if _bridge_bound "$port"; then
-                  echo "✓ $name: bridge healthy (192.168.65.1:$port)"
+                  echo "✓ $name: bridge healthy ($gw:$port)"
                 else
-                  echo "→ $name: running but bridge down (192.168.65.1:$port) — repairing…"
+                  echo "→ $name: running but bridge down ($gw:$port) — repairing…"
                   rm -f "$base_dir/agent-bridge.pid"
                   rmdir "$base_dir/agent-bridge.lock" 2>/dev/null || true
                   _ensure_agent_bridge "$name" "$base_dir"
