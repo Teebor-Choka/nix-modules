@@ -215,6 +215,8 @@
           vsockPort = 9999;
           extraShares = [ ];
           launchMount = true;
+          launchMountPoint = "/mnt/host";
+          defaultMount = null;
           secrets = [ ];
           vfkitExtraArgs = [ ];
           extraModules = [ ];
@@ -416,12 +418,16 @@
               {
                 custom.username = "tester";
                 custom.microvms.smoke.vsockPort = 9999;
-                # Grants secrets + agent by default so the CLI suite can assert default trust
-                # resolution (= "secrets agent") and that --isolated overrides it (= none).
+                # Grants secrets + agent + shares by default so the CLI suite can assert default
+                # trust resolution (= "secrets agent shares") and that --isolated overrides it.
                 custom.microvms.smoke.trust.default = [
                   "secrets"
                   "agent"
+                  "shares"
                 ];
+                # A defaultMount lets the suite assert the shares token pulls it in (and --isolated
+                # / a non-shares grant withholds it, while --mount overrides it).
+                custom.microvms.smoke.defaultMount = "/tmp";
                 # A secret forces the host-side staging into the baked `nix-vm` wrapper. On a
                 # Linux host this exercises the secret-tool branch (bash -n via writeShellScriptBin).
                 custom.microvms.smoke.secrets = [
@@ -526,6 +532,7 @@
       };
 
       checks = selfChecks;
+
       # `nix fmt` — format all .nix files (nixfmt itself doesn't recurse; wrap it with find).
       formatter = lib.genAttrs checkSystems (
         s:

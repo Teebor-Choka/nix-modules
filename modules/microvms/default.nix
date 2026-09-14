@@ -31,6 +31,10 @@ let
   vmTrustDefaultStr = bakeMap (spec: ''"${concatStringsSep "," spec.trust.default}"'');
   # Whether each VM was built with the launch-mount slot (name → 0|1); gates `vm run --mount`.
   vmLaunchMountStr = bakeMap (spec: if spec.launchMount then "1" else "0");
+  # Per-VM default mount host dir (name → abs path or ""); mounted when the `shares` token is granted.
+  vmDefaultMountStr = bakeMap (
+    spec: ''"${if spec.defaultMount == null then "" else spec.defaultMount}"''
+  );
 
   # Platform-derived home directory prefix for option defaults
   homePrefix = if pkgs.stdenv.isDarwin then "/Users" else "/home";
@@ -416,31 +420,51 @@ let
           types.enum [
             "secrets"
             "agent"
+            "shares"
           ]
         );
         default = [ ];
         description = ''
           Capabilities granted to this VM when launched without a trust flag. `[]` (default) grants
-          nothing — secrets are withheld and the host SSH agent is not forwarded unless the launch
-          grants them (`vm run --trust secrets,agent`, or `--trusted`). Set e.g. `[ "secrets" "agent" ]`
-          on a VM that should inject its declared secrets and reach the host agent by default. A VM
-          that clones over SSH at first boot (home.gitClone) needs `agent` here.
+          nothing — secrets withheld, host SSH agent not forwarded, and defaultMount not mounted —
+          unless the launch grants them (`vm run --trust secrets,agent,shares`, or `--trusted`). Set
+          e.g. `[ "secrets" "agent" "shares" ]` on a VM that should inject secrets, reach the host
+          agent, and mount its defaultMount by default. A VM that clones over SSH at first boot
+          (home.gitClone) needs `agent` here.
         '';
-        example = literalExpression ''[ "secrets" "agent" ]'';
+        example = literalExpression ''[ "secrets" "agent" "shares" ]'';
       };
 
-      # ── Ad-hoc launch mount ─────────────────────────────────────────────────────
-      # Build the guest with a per-instance virtiofs slot mounted at /mnt/host. Empty (isolated) by
-      # default; `vm run --mount <dir>` points it at a host directory for that launch (RW). No mount
-      # → the slot stays an empty per-instance dir, so nothing host-side is exposed.
+      # ── Launch mount slot ────────────────────────────────────────────────────────
+      # Build the guest with a per-instance virtiofs slot (guest path = launchMountPoint). Empty
+      # (isolated) by default; a launch points its source at a host dir — either `vm run --mount
+      # <dir>` (explicit, this launch) or the VM's `defaultMount` when the `shares` trust token is
+      # granted. No source → the slot stays an empty per-instance dir, so nothing host-side leaks.
       launchMount = mkOption {
         type = types.bool;
         default = true;
         description = ''
-          Give this VM a launch-mount slot at /mnt/host, so `vm run --mount <hostdir> <name> …` can
-          share a host directory into the guest for a single launch. Nothing is mounted unless
-          --mount is passed. Set false to omit the slot entirely (then --mount is rejected).
+          Give this VM a launch-mount slot (at launchMountPoint), so a host directory can be shared
+          into the guest — via `vm run --mount <hostdir>` or the VM's defaultMount under `shares`
+          trust. Nothing is mounted unless one of those applies. Set false to omit the slot entirely
+          (then --mount is rejected and defaultMount is unusable).
         '';
+      };
+      launchMountPoint = mkOption {
+        type = types.str;
+        default = "/mnt/host";
+        description = "Guest path where the launch-mount slot is mounted (RW).";
+      };
+      defaultMount = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        description = ''
+          Absolute host directory mounted into the guest (at launchMountPoint) when a launch grants
+          the `shares` trust token (via `trust.default`, `--trust shares`, or `--trusted`). `vm run
+          --mount <dir>` overrides it for a single launch; `--isolated` withholds it. Requires
+          launchMount = true.
+        '';
+        example = literalExpression ''"/Users/alice/Projects"'';
       };
 
       # ── Secret injection (KeePassXC → virtiofs → guest) ───────────────────────
@@ -577,6 +601,11 @@ in
             }) spec.secrets
           ) cfg
         )
+        # defaultMount needs the launch-mount slot to exist.
+        ++ mapAttrsToList (name: spec: {
+          assertion = spec.defaultMount == null || spec.launchMount;
+          message = "microVM '${name}': defaultMount is set but launchMount = false — enable launchMount.";
+        }) cfg
         # vsockPort is a per-host resource (host-side socat port + guest CID); the auto-derived
         # default can (rarely) collide. Two VMs on the SAME host must not share one.
         ++ (
@@ -617,12 +646,15 @@ in
           # Per-VM default trust grant (name → csv of tokens; empty = grant nothing at launch)
           declare -A VM_TRUST_DEFAULT=(${vmTrustDefaultStr})
 
-          # Per-VM launch-mount slot presence (1 = built with /mnt/host share; enables `vm run --mount`)
+          # Per-VM launch-mount slot presence (1 = built with the mount share; enables --mount/defaultMount)
           declare -A VM_LAUNCH_MOUNT=(${vmLaunchMountStr})
 
-          # Trust tokens the launcher can grant (secret injection + SSH-agent forwarding; extraShares
-          # are still build-time).
-          VALID_TRUST_TOKENS="secrets agent"
+          # Per-VM default mount host dir (empty = none); used when the `shares` token is granted.
+          declare -A VM_DEFAULT_MOUNT=(${vmDefaultMountStr})
+
+          # Trust tokens the launcher can grant: secret injection, SSH-agent forwarding, and the VM's
+          # default mount (shares).
+          VALID_TRUST_TOKENS="secrets agent shares"
           # Resolved launch grant (space-separated tokens); set per launch by vm_up/vm_run, read by
           # the secret-staging dispatch in _vm_prepare. Init empty so `set -u` never trips on it.
           GRANT=""
@@ -650,6 +682,18 @@ in
 
           # Space-list membership test: _in_list <needle> <item…>
           _in_list() { local n=$1; shift; local x; for x in $*; do [ "$x" = "$n" ] && return 0; done; return 1; }
+
+          # Apply the VM's defaultMount as the mount source when `shares` is granted and no explicit
+          # --mount was given. Explicit --mount (MOUNT_SRC already set) and --isolated (no `shares`)
+          # both leave MOUNT_SRC untouched. Reads GRANT + VM_DEFAULT_MOUNT.
+          _resolve_default_mount() {
+            local name=$1
+            [ -z "$MOUNT_SRC" ] || return 0
+            _in_list shares "$GRANT" || return 0
+            local d="''${VM_DEFAULT_MOUNT[$name]:-}"
+            [ -n "$d" ] && MOUNT_SRC="$d"
+            return 0
+          }
 
           # Resolve the launch grant. $1 mode(trusted|isolated|set|default) $2 csv(for set) $3 vm-default csv.
           # Echoes the normalized space-separated grant; exits 2 on an unknown token in a --trust csv.
@@ -679,11 +723,11 @@ in
             run   [opts] <name> <cmd…>   Boot headlessly, run a command, stream output, return exit code
 
           Launch options (before <name>; isolated by default — nothing granted unless asked):
-            --trusted             Grant every capability this VM declares (secrets + agent)
+            --trusted             Grant every capability this VM declares (secrets + agent + shares)
             --isolated            Grant nothing (overrides the VM's default trust)
-            --trust <a,b>         Grant an explicit set (tokens: secrets, agent)
+            --trust <a,b>         Grant an explicit set (tokens: secrets, agent, shares)
             --env KEY=VALUE       Export KEY into the command's env (run only; repeatable)
-            --mount <hostdir>     Share <hostdir> into the guest at /mnt/host for this launch (RW)
+            --mount <hostdir>     Share <hostdir> into the guest for this launch (RW; overrides defaultMount)
             test  <name> [secs]   Headless smoke-test: boot to multi-user then tear down (exit 0=pass)
             down  <name>          Stop the shared SSH-agent bridge for a VM
             list                  Show defined VMs and bridge status
@@ -863,6 +907,7 @@ in
             local name=''${1:?'Usage: vm up [trust] [--mount DIR] <name>'}
             if [ "''${VM_GRANT_OVERRIDE_SET:-}" != 1 ]; then
               GRANT=$(_resolve_grant "$mode" "$csv" "''${VM_TRUST_DEFAULT[$name]:-}") || return 2
+              _resolve_default_mount "$name"
             fi
             if [ "''${VM_DEBUG_GRANT:-}" = 1 ]; then
               echo "grant: ''${GRANT:-<none>}"
@@ -907,6 +952,7 @@ in
             shift
             local cmd="$*"
             GRANT=$(_resolve_grant "$mode" "$csv" "''${VM_TRUST_DEFAULT[$name]:-}") || return 2
+            _resolve_default_mount "$name"
             if [ "''${VM_DEBUG_GRANT:-}" = 1 ]; then
               echo "grant: ''${GRANT:-<none>}"
               echo "env: ''${env_prefix:-<none>}"

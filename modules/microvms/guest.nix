@@ -91,10 +91,10 @@ in
       proto = "virtiofs";
     }
     # Launch-mount slot: relative source "mount" (this instance's mount/ dir, empty by default). The
-    # host `vm run --mount <dir>` patches this share's source to <dir> for a single launch. RW.
+    # host patches this share's source to a host dir (--mount or defaultMount) for a launch. RW.
     ++ lib.optional vmSpec.launchMount {
       source = "mount";
-      mountPoint = "/mnt/host";
+      mountPoint = vmSpec.launchMountPoint;
       tag = "launchmount";
       proto = "virtiofs";
     };
