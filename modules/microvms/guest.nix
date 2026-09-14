@@ -89,6 +89,14 @@ in
       mountPoint = "/run/injected-secrets";
       tag = "injected-secrets";
       proto = "virtiofs";
+    }
+    # Launch-mount slot: relative source "mount" (this instance's mount/ dir, empty by default). The
+    # host `vm run --mount <dir>` patches this share's source to <dir> for a single launch. RW.
+    ++ lib.optional vmSpec.launchMount {
+      source = "mount";
+      mountPoint = "/mnt/host";
+      tag = "launchmount";
+      proto = "virtiofs";
     };
 
   # ── Volumes (RELATIVE image paths → resolved against the launch's working dir):

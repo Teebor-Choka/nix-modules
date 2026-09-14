@@ -214,6 +214,7 @@
           forwardSshAgent = true;
           vsockPort = 9999;
           extraShares = [ ];
+          launchMount = true;
           secrets = [ ];
           vfkitExtraArgs = [ ];
           extraModules = [ ];

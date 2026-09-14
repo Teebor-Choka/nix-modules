@@ -29,6 +29,8 @@ let
   # Per-VM default trust grant (name → csv of tokens; empty = grant nothing). Quoted so an empty
   # value or a multi-token csv survives the bash assoc-array literal.
   vmTrustDefaultStr = bakeMap (spec: ''"${concatStringsSep "," spec.trust.default}"'');
+  # Whether each VM was built with the launch-mount slot (name → 0|1); gates `vm run --mount`.
+  vmLaunchMountStr = bakeMap (spec: if spec.launchMount then "1" else "0");
 
   # Platform-derived home directory prefix for option defaults
   homePrefix = if pkgs.stdenv.isDarwin then "/Users" else "/home";
@@ -427,6 +429,20 @@ let
         example = literalExpression ''[ "secrets" "agent" ]'';
       };
 
+      # ── Ad-hoc launch mount ─────────────────────────────────────────────────────
+      # Build the guest with a per-instance virtiofs slot mounted at /mnt/host. Empty (isolated) by
+      # default; `vm run --mount <dir>` points it at a host directory for that launch (RW). No mount
+      # → the slot stays an empty per-instance dir, so nothing host-side is exposed.
+      launchMount = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          Give this VM a launch-mount slot at /mnt/host, so `vm run --mount <hostdir> <name> …` can
+          share a host directory into the guest for a single launch. Nothing is mounted unless
+          --mount is passed. Set false to omit the slot entirely (then --mount is rejected).
+        '';
+      };
+
       # ── Secret injection (KeePassXC → virtiofs → guest) ───────────────────────
       # When non-empty, the host stages each secret before launch and the guest places it
       # at its target then wipes the host copy (see secrets.nix). The /run/injected-secrets
@@ -601,12 +617,36 @@ in
           # Per-VM default trust grant (name → csv of tokens; empty = grant nothing at launch)
           declare -A VM_TRUST_DEFAULT=(${vmTrustDefaultStr})
 
+          # Per-VM launch-mount slot presence (1 = built with /mnt/host share; enables `vm run --mount`)
+          declare -A VM_LAUNCH_MOUNT=(${vmLaunchMountStr})
+
           # Trust tokens the launcher can grant (secret injection + SSH-agent forwarding; extraShares
           # are still build-time).
           VALID_TRUST_TOKENS="secrets agent"
           # Resolved launch grant (space-separated tokens); set per launch by vm_up/vm_run, read by
           # the secret-staging dispatch in _vm_prepare. Init empty so `set -u` never trips on it.
           GRANT=""
+          # Ad-hoc --mount host dir for this launch (abs path; empty = no mount). Read by _vm_prepare
+          # to patch the runner's launchmount share source. Init empty for `set -u`.
+          MOUNT_SRC=""
+
+          # Build an `export KEY=VALUE; ` snippet for --env; validates KEY, quotes VALUE. rc 2 on error.
+          _env_export() {
+            local kv=$1 k v
+            case "$kv" in
+              *=*) k=''${kv%%=*}; v=''${kv#*=} ;;
+              *)   echo "✗ --env expects KEY=VALUE, got '$kv'" >&2; return 2 ;;
+            esac
+            [[ $k =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo "✗ --env invalid variable name: '$k'" >&2; return 2; }
+            printf 'export %s=%q; ' "$k" "$v"
+          }
+
+          # Resolve a --mount argument to an absolute directory (rc 2 if it isn't a directory).
+          _abs_dir() {
+            local d=$1
+            [ -d "$d" ] || { echo "✗ --mount: not a directory: $d" >&2; return 2; }
+            ( cd "$d" && pwd )
+          }
 
           # Space-list membership test: _in_list <needle> <item…>
           _in_list() { local n=$1; shift; local x; for x in $*; do [ "$x" = "$n" ] && return 0; done; return 1; }
@@ -635,13 +675,15 @@ in
 
           Commands:
             build <name>          Build VM guest image (run before first up, or after rebuild)
-            up    [trust] <name>          Start VM interactively (attaches serial console)
-            run   [trust] <name> <cmd…>   Boot headlessly, run a command, stream output, return exit code
+            up    [opts] <name>          Start VM interactively (attaches serial console)
+            run   [opts] <name> <cmd…>   Boot headlessly, run a command, stream output, return exit code
 
-          Trust flags (before <name>; isolated by default — nothing granted unless asked):
+          Launch options (before <name>; isolated by default — nothing granted unless asked):
             --trusted             Grant every capability this VM declares (secrets + agent)
             --isolated            Grant nothing (overrides the VM's default trust)
             --trust <a,b>         Grant an explicit set (tokens: secrets, agent)
+            --env KEY=VALUE       Export KEY into the command's env (run only; repeatable)
+            --mount <hostdir>     Share <hostdir> into the guest at /mnt/host for this launch (RW)
             test  <name> [secs]   Headless smoke-test: boot to multi-user then tear down (exit 0=pass)
             down  <name>          Stop the shared SSH-agent bridge for a VM
             list                  Show defined VMs and bridge status
@@ -775,14 +817,33 @@ in
               mv "$INST_DIR/.microvm-run.new" "$INST_DIR/microvm-run"
             fi
 
+            # Launch mount: the guest is built with a virtiofs share whose source is the relative
+            # dir "mount" (→ this instance's mount/). Create it empty (isolated default), or point
+            # the runner's launchmount share at the requested --mount host dir (patched like the MAC).
+            if [ "''${VM_LAUNCH_MOUNT[$name]:-0}" = 1 ]; then
+              mkdir -p "$INST_DIR/mount"
+              if [ -n "$MOUNT_SRC" ]; then
+                sed "s|sharedDir=mount,mountTag=launchmount|sharedDir=$MOUNT_SRC,mountTag=launchmount|" \
+                    "$INST_DIR/microvm-run" > "$INST_DIR/.microvm-run.new"
+                chmod u+x "$INST_DIR/.microvm-run.new"
+                mv "$INST_DIR/.microvm-run.new" "$INST_DIR/microvm-run"
+                echo "→ mounting $MOUNT_SRC at /mnt/host in $name"
+              fi
+            elif [ -n "$MOUNT_SRC" ]; then
+              echo "✗ --mount: '$name' was built without a launch-mount slot (launchMount = false)" >&2
+              return 2
+            fi
+
             RUNNER="$INST_DIR/microvm-run"
           }
 
           vm_up() {
             local mode=default csv=""
-            # A PTY re-exec (below) carries the already-resolved grant via env; skip re-parsing then.
+            MOUNT_SRC=""
+            # A PTY re-exec (below) carries the already-resolved grant + mount via env; skip re-parsing.
             if [ "''${VM_GRANT_OVERRIDE_SET:-}" = 1 ]; then
               GRANT="''${VM_GRANT_OVERRIDE:-}"
+              MOUNT_SRC="''${VM_MOUNT_OVERRIDE:-}"
             else
               while [ $# -gt 0 ]; do
                 case "$1" in
@@ -790,22 +851,29 @@ in
                   --isolated) mode=isolated; shift ;;
                   --trust)    mode=set; csv=''${2:?'--trust needs a comma-separated token list'}; shift 2 ;;
                   --trust=*)  mode=set; csv=''${1#--trust=}; shift ;;
+                  --mount)    MOUNT_SRC=$(_abs_dir "''${2:?'--mount needs a host directory'}") || return 2; shift 2 ;;
+                  --mount=*)  MOUNT_SRC=$(_abs_dir "''${1#--mount=}") || return 2; shift ;;
+                  --env|--env=*) echo "✗ --env is supported only on 'vm run' (vm up is an interactive login)" >&2; return 2 ;;
                   --)         shift; break ;;
                   -*)         echo "✗ unknown option: $1" >&2; return 2 ;;
                   *)          break ;;
                 esac
               done
             fi
-            local name=''${1:?'Usage: vm up [--trusted|--isolated|--trust <csv>] <name>'}
+            local name=''${1:?'Usage: vm up [trust] [--mount DIR] <name>'}
             if [ "''${VM_GRANT_OVERRIDE_SET:-}" != 1 ]; then
               GRANT=$(_resolve_grant "$mode" "$csv" "''${VM_TRUST_DEFAULT[$name]:-}") || return 2
             fi
-            if [ "''${VM_DEBUG_GRANT:-}" = 1 ]; then echo "grant: ''${GRANT:-<none>}"; return 0; fi
+            if [ "''${VM_DEBUG_GRANT:-}" = 1 ]; then
+              echo "grant: ''${GRANT:-<none>}"
+              echo "mount: ''${MOUNT_SRC:-<none>}"
+              return 0
+            fi
             # vfkit's virtio-serial,stdio requires a real TTY. Re-exec through a PTY when stdin is not one.
             if [ "$OS" = "Darwin" ] && ! [ -t 0 ]; then
               command -v python3 >/dev/null 2>&1 \
                 || { echo "✗ vm up needs python3 to allocate a PTY (vfkit requires a TTY for the serial console)" >&2; return 2; }
-              exec env VM_GRANT_OVERRIDE="$GRANT" VM_GRANT_OVERRIDE_SET=1 \
+              exec env VM_GRANT_OVERRIDE="$GRANT" VM_GRANT_OVERRIDE_SET=1 VM_MOUNT_OVERRIDE="$MOUNT_SRC" \
                 python3 -c 'import pty,sys; pty.spawn(sys.argv[1:])' "$0" up "$name"
             fi
             _vm_prepare "$name" || return ''${?}
@@ -818,26 +886,38 @@ in
           }
 
           vm_run() {
-            local mode=default csv=""
+            local mode=default csv="" env_prefix=""
+            MOUNT_SRC=""
             while [ $# -gt 0 ]; do
               case "$1" in
                 --trusted)  mode=trusted;  shift ;;
                 --isolated) mode=isolated; shift ;;
                 --trust)    mode=set; csv=''${2:?'--trust needs a comma-separated token list'}; shift 2 ;;
                 --trust=*)  mode=set; csv=''${1#--trust=}; shift ;;
+                --env)      env_prefix+=$(_env_export "''${2:?'--env needs KEY=VALUE'}") || return 2; shift 2 ;;
+                --env=*)    env_prefix+=$(_env_export "''${1#--env=}") || return 2; shift ;;
+                --mount)    MOUNT_SRC=$(_abs_dir "''${2:?'--mount needs a host directory'}") || return 2; shift 2 ;;
+                --mount=*)  MOUNT_SRC=$(_abs_dir "''${1#--mount=}") || return 2; shift ;;
                 --)         shift; break ;;
                 -*)         echo "✗ unknown option: $1" >&2; return 2 ;;
                 *)          break ;;
               esac
             done
-            local name=''${1:?'Usage: vm run [--trusted|--isolated|--trust <csv>] <name> <command…>'}
+            local name=''${1:?'Usage: vm run [trust] [--env K=V]… [--mount DIR] <name> <command…>'}
             shift
             local cmd="$*"
             GRANT=$(_resolve_grant "$mode" "$csv" "''${VM_TRUST_DEFAULT[$name]:-}") || return 2
-            if [ "''${VM_DEBUG_GRANT:-}" = 1 ]; then echo "grant: ''${GRANT:-<none>}"; return 0; fi
+            if [ "''${VM_DEBUG_GRANT:-}" = 1 ]; then
+              echo "grant: ''${GRANT:-<none>}"
+              echo "env: ''${env_prefix:-<none>}"
+              echo "mount: ''${MOUNT_SRC:-<none>}"
+              return 0
+            fi
             [ -n "$cmd" ] || { echo "✗ vm run: command required" >&2; return 2; }
             command -v python3 >/dev/null 2>&1 || { echo "✗ vm run needs python3 (console driver)" >&2; return 2; }
             _vm_prepare "$name" || return ''${?}
+            # Prepend --env exports so they are set for the command's shell (and its children).
+            cmd="$env_prefix$cmd"
             # Base64-encode the command to avoid all quoting hazards on the serial console
             local b64cmd
             b64cmd=$(printf '%s' "$cmd" | base64 | tr -d '\n')
