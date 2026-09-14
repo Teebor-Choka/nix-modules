@@ -73,7 +73,7 @@ A VM that clones over SSH at first boot (`home.gitClone`) needs `agent` in its `
 `vm doctor` never resurrects the bridge of a VM launched without `agent` (it reads the launch grant
 persisted at `~/.local/state/microvm/<name>/.launch-grant`).
 
-### Ad-hoc launch inputs (`--env`, `--mount`)
+### Ad-hoc launch inputs (`--env`, `--mount`, `--cpu`, `--mem`)
 
 Pass one-off inputs at launch without editing the flake — the e2b-style "create a sandbox, give it
 this env and this directory, run" flow:
@@ -81,7 +81,8 @@ this env and this directory, run" flow:
 ```bash
 vm run --env KEY=VALUE <name> <cmd…>          # export KEY for the command (repeatable; run only)
 vm run --mount ./project <name> 'cd /mnt/host && …'   # share a host dir at launchMountPoint (RW, this launch)
-vm run --env TOKEN=… --mount ./repo --trust agent <name> <cmd…>   # combine freely
+vm run --cpu 4 --mem 2048 <name> <cmd…>       # override vCPU / memory (MiB) for this launch
+vm run --env TOKEN=… --mount ./repo --cpu 8 --trust agent <name> <cmd…>   # combine freely
 ```
 
 - `--env` prepends `export`s to the command's shell (so children inherit them); it is a `vm run`
@@ -92,6 +93,10 @@ vm run --env TOKEN=… --mount ./repo --trust agent <name> <cmd…>   # combine 
   Without `--mount` (and without the `shares` token pulling in `defaultMount`) the slot is an empty
   per-instance dir, so nothing is exposed. Requires the slot (`launchMount = true`, the default);
   `launchMount = false` omits it and rejects `--mount`.
+- `--cpu N` / `--mem MiB` (both `vm up` and `vm run`) override the VM's built-in `vcpu` / `mem` for
+  a single launch by patching the runner's resource args (vfkit `--cpus`/`--memory`, qemu
+  `-smp`/`-m`). No flag keeps the declared size. A launch warns (non-fatally) if the override
+  didn't match the runner rather than silently booting the built-in size.
 
 A VM can declare a **`defaultMount`** (host dir) that mounts automatically whenever the launch
 grants `shares` (typically via `trust.default`) — so `vm run <name> …` shares it with no flag,
@@ -125,7 +130,7 @@ Per-instance (ephemeral): `~/.local/state/microvm/<name>/run.<pid>.<rand>/` hold
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `hypervisor` | `vfkit`/`qemu` | Auto-detected from host platform |
+| `hypervisor` | `vfkit`/`qemu` | Hypervisor backend. Only **vfkit** (macOS) and **qemu** (Linux) are supported — the launcher relies on virtiofs shares (store, secrets, mount) and CLI-arg runner patching (MAC, mount, `--cpu`/`--mem`), which map to those two. Firecracker is not a drop-in (no virtio-fs; JSON-config runner); cloud-hypervisor/crosvm would be the closest additions. |
 | `vcpu` | `12` | Virtual CPU count |
 | `mem` | `10240` | RAM in MiB |
 | `homeSize` | `10240` | `/home` size in MiB |

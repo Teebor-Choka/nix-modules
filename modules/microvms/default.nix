@@ -661,6 +661,19 @@ in
           # Ad-hoc --mount host dir for this launch (abs path; empty = no mount). Read by _vm_prepare
           # to patch the runner's launchmount share source. Init empty for `set -u`.
           MOUNT_SRC=""
+          # Ad-hoc --cpu / --mem overrides for this launch (empty = keep the VM's built-in vcpu/mem).
+          # Read by _vm_prepare to patch the runner's --cpus/--memory (vfkit) or -smp/-m (qemu).
+          CPU_OVERRIDE=""
+          MEM_OVERRIDE=""
+
+          # Validate a positive integer argument (rc 2 otherwise). $1 flag-name $2 value.
+          _pos_int() {
+            case "$2" in
+              "" | *[!0-9]*) echo "✗ $1 needs a positive integer, got '$2'" >&2; return 2 ;;
+            esac
+            [ "$2" -gt 0 ] || { echo "✗ $1 must be > 0" >&2; return 2; }
+            printf '%s' "$2"
+          }
 
           # Build an `export KEY=VALUE; ` snippet for --env; validates KEY, quotes VALUE. rc 2 on error.
           _env_export() {
@@ -678,6 +691,33 @@ in
             local d=$1
             [ -d "$d" ] || { echo "✗ --mount: not a directory: $d" >&2; return 2; }
             ( cd "$d" && pwd )
+          }
+
+          # Patch the copied runner's CPU/memory literals for a launch override. Engine-specific
+          # (vfkit: --cpus/--memory; qemu: -smp/-m<N>M) — the same two engines the other runner
+          # patches target. Portable (no `sed -i`). Verifies the edit landed and WARNS otherwise,
+          # so a runner-format drift surfaces instead of silently keeping the built-in size.
+          _patch_resources() {
+            local runner=$1 expr=""
+            [ -n "$CPU_OVERRIDE$MEM_OVERRIDE" ] || return 0
+            if [ "$OS" = "Darwin" ]; then
+              [ -n "$CPU_OVERRIDE" ] && expr="$expr;s/--cpus [0-9][0-9]*/--cpus $CPU_OVERRIDE/"
+              [ -n "$MEM_OVERRIDE" ] && expr="$expr;s/--memory [0-9][0-9]*/--memory $MEM_OVERRIDE/"
+            else
+              [ -n "$CPU_OVERRIDE" ] && expr="$expr;s/-smp [0-9][0-9]*/-smp $CPU_OVERRIDE/"
+              [ -n "$MEM_OVERRIDE" ] && expr="$expr;s/-m [0-9][0-9]*M/-m ''${MEM_OVERRIDE}M/"
+            fi
+            sed "''${expr#;}" "$runner" > "$runner.res" && chmod u+x "$runner.res" && mv "$runner.res" "$runner"
+            if [ -n "$CPU_OVERRIDE" ]; then
+              local pat; [ "$OS" = "Darwin" ] && pat="--cpus $CPU_OVERRIDE" || pat="-smp $CPU_OVERRIDE"
+              grep -q -- "$pat" "$runner" && echo "→ cpu override: $CPU_OVERRIDE" \
+                || echo "⚠  --cpu override did not match the runner — booting with the built-in vcpu" >&2
+            fi
+            if [ -n "$MEM_OVERRIDE" ]; then
+              local pat; [ "$OS" = "Darwin" ] && pat="--memory $MEM_OVERRIDE" || pat="-m ''${MEM_OVERRIDE}M"
+              grep -q -- "$pat" "$runner" && echo "→ mem override: ''${MEM_OVERRIDE} MiB" \
+                || echo "⚠  --mem override did not match the runner — booting with the built-in mem" >&2
+            fi
           }
 
           # Space-list membership test: _in_list <needle> <item…>
@@ -728,6 +768,8 @@ in
             --trust <a,b>         Grant an explicit set (tokens: secrets, agent, shares)
             --env KEY=VALUE       Export KEY into the command's env (run only; repeatable)
             --mount <hostdir>     Share <hostdir> into the guest for this launch (RW; overrides defaultMount)
+            --cpu N               Override the guest vCPU count for this launch
+            --mem MiB             Override the guest memory (MiB) for this launch
             test  <name> [secs]   Headless smoke-test: boot to multi-user then tear down (exit 0=pass)
             down  <name>          Stop the shared SSH-agent bridge for a VM
             list                  Show defined VMs and bridge status
@@ -878,16 +920,22 @@ in
               return 2
             fi
 
+            # Launch CPU/memory overrides (patched into the copied runner, like the MAC/mount).
+            _patch_resources "$INST_DIR/microvm-run"
+
             RUNNER="$INST_DIR/microvm-run"
           }
 
           vm_up() {
             local mode=default csv=""
-            MOUNT_SRC=""
-            # A PTY re-exec (below) carries the already-resolved grant + mount via env; skip re-parsing.
+            MOUNT_SRC=""; CPU_OVERRIDE=""; MEM_OVERRIDE=""
+            # A PTY re-exec (below) carries the already-resolved grant + mount + cpu/mem via env;
+            # skip re-parsing then.
             if [ "''${VM_GRANT_OVERRIDE_SET:-}" = 1 ]; then
               GRANT="''${VM_GRANT_OVERRIDE:-}"
               MOUNT_SRC="''${VM_MOUNT_OVERRIDE:-}"
+              CPU_OVERRIDE="''${VM_CPU_OVERRIDE:-}"
+              MEM_OVERRIDE="''${VM_MEM_OVERRIDE:-}"
             else
               while [ $# -gt 0 ]; do
                 case "$1" in
@@ -897,6 +945,10 @@ in
                   --trust=*)  mode=set; csv=''${1#--trust=}; shift ;;
                   --mount)    MOUNT_SRC=$(_abs_dir "''${2:?'--mount needs a host directory'}") || return 2; shift 2 ;;
                   --mount=*)  MOUNT_SRC=$(_abs_dir "''${1#--mount=}") || return 2; shift ;;
+                  --cpu)      CPU_OVERRIDE=$(_pos_int --cpu "''${2:?'--cpu needs a positive integer'}") || return 2; shift 2 ;;
+                  --cpu=*)    CPU_OVERRIDE=$(_pos_int --cpu "''${1#--cpu=}") || return 2; shift ;;
+                  --mem)      MEM_OVERRIDE=$(_pos_int --mem "''${2:?'--mem needs a positive integer (MiB)'}") || return 2; shift 2 ;;
+                  --mem=*)    MEM_OVERRIDE=$(_pos_int --mem "''${1#--mem=}") || return 2; shift ;;
                   --env|--env=*) echo "✗ --env is supported only on 'vm run' (vm up is an interactive login)" >&2; return 2 ;;
                   --)         shift; break ;;
                   -*)         echo "✗ unknown option: $1" >&2; return 2 ;;
@@ -904,7 +956,7 @@ in
                 esac
               done
             fi
-            local name=''${1:?'Usage: vm up [trust] [--mount DIR] <name>'}
+            local name=''${1:?'Usage: vm up [trust] [--mount DIR] [--cpu N] [--mem MiB] <name>'}
             if [ "''${VM_GRANT_OVERRIDE_SET:-}" != 1 ]; then
               GRANT=$(_resolve_grant "$mode" "$csv" "''${VM_TRUST_DEFAULT[$name]:-}") || return 2
               _resolve_default_mount "$name"
@@ -912,6 +964,8 @@ in
             if [ "''${VM_DEBUG_GRANT:-}" = 1 ]; then
               echo "grant: ''${GRANT:-<none>}"
               echo "mount: ''${MOUNT_SRC:-<none>}"
+              echo "cpu: ''${CPU_OVERRIDE:-<default>}"
+              echo "mem: ''${MEM_OVERRIDE:-<default>}"
               return 0
             fi
             # vfkit's virtio-serial,stdio requires a real TTY. Re-exec through a PTY when stdin is not one.
@@ -919,6 +973,7 @@ in
               command -v python3 >/dev/null 2>&1 \
                 || { echo "✗ vm up needs python3 to allocate a PTY (vfkit requires a TTY for the serial console)" >&2; return 2; }
               exec env VM_GRANT_OVERRIDE="$GRANT" VM_GRANT_OVERRIDE_SET=1 VM_MOUNT_OVERRIDE="$MOUNT_SRC" \
+                VM_CPU_OVERRIDE="$CPU_OVERRIDE" VM_MEM_OVERRIDE="$MEM_OVERRIDE" \
                 python3 -c 'import pty,sys; pty.spawn(sys.argv[1:])' "$0" up "$name"
             fi
             _vm_prepare "$name" || return ''${?}
@@ -932,7 +987,7 @@ in
 
           vm_run() {
             local mode=default csv="" env_prefix=""
-            MOUNT_SRC=""
+            MOUNT_SRC=""; CPU_OVERRIDE=""; MEM_OVERRIDE=""
             while [ $# -gt 0 ]; do
               case "$1" in
                 --trusted)  mode=trusted;  shift ;;
@@ -943,12 +998,16 @@ in
                 --env=*)    env_prefix+=$(_env_export "''${1#--env=}") || return 2; shift ;;
                 --mount)    MOUNT_SRC=$(_abs_dir "''${2:?'--mount needs a host directory'}") || return 2; shift 2 ;;
                 --mount=*)  MOUNT_SRC=$(_abs_dir "''${1#--mount=}") || return 2; shift ;;
+                --cpu)      CPU_OVERRIDE=$(_pos_int --cpu "''${2:?'--cpu needs a positive integer'}") || return 2; shift 2 ;;
+                --cpu=*)    CPU_OVERRIDE=$(_pos_int --cpu "''${1#--cpu=}") || return 2; shift ;;
+                --mem)      MEM_OVERRIDE=$(_pos_int --mem "''${2:?'--mem needs a positive integer (MiB)'}") || return 2; shift 2 ;;
+                --mem=*)    MEM_OVERRIDE=$(_pos_int --mem "''${1#--mem=}") || return 2; shift ;;
                 --)         shift; break ;;
                 -*)         echo "✗ unknown option: $1" >&2; return 2 ;;
                 *)          break ;;
               esac
             done
-            local name=''${1:?'Usage: vm run [trust] [--env K=V]… [--mount DIR] <name> <command…>'}
+            local name=''${1:?'Usage: vm run [trust] [--env K=V]… [--mount DIR] [--cpu N] [--mem MiB] <name> <command…>'}
             shift
             local cmd="$*"
             GRANT=$(_resolve_grant "$mode" "$csv" "''${VM_TRUST_DEFAULT[$name]:-}") || return 2
@@ -957,6 +1016,8 @@ in
               echo "grant: ''${GRANT:-<none>}"
               echo "env: ''${env_prefix:-<none>}"
               echo "mount: ''${MOUNT_SRC:-<none>}"
+              echo "cpu: ''${CPU_OVERRIDE:-<default>}"
+              echo "mem: ''${MEM_OVERRIDE:-<default>}"
               return 0
             fi
             [ -n "$cmd" ] || { echo "✗ vm run: command required" >&2; return 2; }
