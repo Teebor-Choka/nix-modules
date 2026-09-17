@@ -16,6 +16,10 @@ let
   hostHome = "${hostHomePrefix}/${vmSpec.user}";
   stateDir = "${hostHome}/.local/state/microvm/${vmName}";
 
+  # sandy reverse-tunnel: the shared host tunnel-sshd port (KEEP IN SYNC with the SANDY_TSSHPORT
+  # bash constant in default.nix). The guest dials 192.168.65.1:<this> using the forwarded agent.
+  sandyTunnelPort = 20022;
+
   # Share the host /nix/store read-only (vs a per-VM EROFS image). Immutable → safe across
   # concurrent instances. Adding this share flips microvm.storeOnDisk to false automatically.
   shareHostStore = vmSpec.storeBacking == "host";
@@ -305,6 +309,43 @@ in
     wants = [ "ssh-agent-bridge-ready.service" ];
     environment.SSH_AUTH_SOCK = "/run/ssh-agent/agent.sock";
   };
+
+  # ── sandy reverse tunnel (vfkit only): dial the shared host tunnel sshd on the vfkit gateway with
+  #    the forwarded agent and expose THIS guest's sshd back to the host as 127.0.0.1:<rvport>, so
+  #    `vm attach <id>` can open (multiple) shells into this box. rvport is derived from this NIC's
+  #    MAC with the SAME formula the host uses (sandy-lib.sh `_sandy_rvport_for_mac`) — KEEP IN SYNC.
+  systemd.services.sandy-tunnel =
+    lib.mkIf (vmSpec.hypervisor == "vfkit" && vmSpec.forwardSshAgent && vmSpec.guestSSH.enable)
+      {
+        description = "sandy reverse tunnel (guest sshd → host, for `vm attach`)";
+        after = [
+          "ssh-agent-bridge-ready.service"
+          "sshd.service"
+        ];
+        wants = [ "ssh-agent-bridge-ready.service" ];
+        requires = [ "ssh-agent-bridge-ready.service" ];
+        wantedBy = [ "multi-user.target" ];
+        serviceConfig = {
+          Type = "simple";
+          Environment = "SSH_AUTH_SOCK=/run/ssh-agent/agent.sock";
+          Restart = "always";
+          RestartSec = "5s";
+          ExecStart = pkgs.writeShellScript "sandy-tunnel" ''
+            set -u
+            iface=$(${pkgs.coreutils}/bin/ls /sys/class/net | ${pkgs.gnugrep}/bin/grep -vE '^lo$' | ${pkgs.coreutils}/bin/head -1)
+            [ -n "$iface" ] || { echo "sandy-tunnel: no non-loopback NIC found" >&2; exit 1; }
+            mac=$(${pkgs.coreutils}/bin/cat "/sys/class/net/$iface/address")
+            hex=$(printf '%s' "$mac" | ${pkgs.coreutils}/bin/tr -d ':' | ${pkgs.coreutils}/bin/tr 'A-F' 'a-f')
+            hex=''${hex: -6}                              # last 3 octets
+            rvport=$(( 21000 + (16#$hex % 2000) ))        # MUST match sandy-lib.sh _sandy_rvport_for_mac
+            exec ${pkgs.openssh}/bin/ssh -N \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+              -R "$rvport:localhost:22" -p ${toString sandyTunnelPort} \
+              ${vmSpec.user}@192.168.65.1
+          '';
+        };
+      };
 
   # GitHub SSH host keys — pre-trusted so home.gitClone over SSH doesn't fail on first boot.
   # Writes to /etc/ssh/ssh_known_hosts (system-wide). Rotate if GitHub announces a key change.

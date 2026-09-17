@@ -33,6 +33,16 @@ out=$("$vm" doctor 2>&1); rc=$?
 out=$("$vm" builder status 2>&1); rc=$?
 { [ "$rc" = 1 ] && grep -qi 'macOS-only' <<<"$out"; } && ok "builder → macOS-only error on Linux" || bad "builder gate"
 
+# ── sandy `attach` dispatch (no VM needed) ──────────────────────────────────────
+out=$("$vm" 2>&1); rc=$?
+{ [ "$rc" = 0 ] && grep -q 'attach' <<<"$out"; } && ok "usage lists attach" || bad "usage attach"
+
+out=$("$vm" attach bogus-box 2>&1); rc=$?
+{ [ "$rc" = 1 ] && grep -qi 'no running box' <<<"$out"; } && ok "attach unknown id → exit 1" || bad "attach unknown"
+
+out=$("$vm" attach 2>&1); rc=$?
+{ [ "$rc" != 0 ] && grep -qi 'attach' <<<"$out"; } && ok "attach no-arg → usage error" || bad "attach no-arg"
+
 # ── Launch-time trust resolution (VM_DEBUG_GRANT prints the grant and exits before any build) ──
 # The 'smoke' VM declares trust.default = [ "secrets" "agent" "shares" ] + defaultMount = /tmp.
 # Matches are exact-line (grep -x).
