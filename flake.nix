@@ -492,6 +492,24 @@
                 bash ${./tests/agent-bridge-suite.sh} ${./modules/microvms/agent-bridge-lib.sh}
                 touch "$out"
               '';
+
+          # Unit regression for the sandy box-registry helpers (sandy-lib.sh): id generation,
+          # box-record round-trip, resolve-by-id/name, and dead-pid prune. Pure filesystem + a
+          # scratch SANDY_HOME — no VM. See tests/sandy-suite.sh.
+          sandy =
+            pkgs.runCommand "sandy"
+              {
+                nativeBuildInputs = [
+                  pkgs.bash
+                  pkgs.coreutils
+                  pkgs.gnugrep
+                  pkgs.gnused
+                ];
+              }
+              ''
+                bash ${./tests/sandy-suite.sh} ${./modules/microvms/sandy-lib.sh}
+                touch "$out"
+              '';
         }
         # The PTY-driven console suite and the host-eval CLI suite are Linux-only: they need a
         # working /dev/ptmx and process tools inside the build sandbox. The GitHub macOS runner's

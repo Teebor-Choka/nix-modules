@@ -639,6 +639,9 @@ in
           # SSH-agent relay lifecycle helpers (pure; unit-tested in tests/agent-bridge-suite.sh).
           ${builtins.readFile ./agent-bridge-lib.sh}
 
+          # sandy orchestration: box identity + registry helpers (pure; unit-tested in tests/sandy-suite.sh).
+          ${builtins.readFile ./sandy-lib.sh}
+
           # vsock port per VM name — baked in at Nix build time (Linux qemu bridge)
           declare -A VM_VSOCK_PORTS=(${vmPortsStr})
 
@@ -917,16 +920,34 @@ in
             cd "$INST_DIR" || { echo "cannot enter $INST_DIR" >&2; return 1; }
             [ "$persistent" = 1 ] && echo $$ > "$INST_DIR/instance.lock"
 
-            # Cleanup trap: remove per-instance transient files; wipe the whole dir if ephemeral.
-            # Bakes current values so the trap stays valid after _vm_prepare returns.
+            # Assign this launch a unique sandy identity (five-word name + 8-hex short id), avoiding a
+            # collision with any live box. Exposed as globals BOX_NAME/BOX_SHORTID for vm_up/vm_run.
+            BOX_SHORTID=$(_sandy_gen_shortid)
+            while [ -e "$(_sandy_boxes_dir)/$BOX_SHORTID.json" ]; do BOX_SHORTID=$(_sandy_gen_shortid); done
+            BOX_NAME=$(_sandy_gen_name)
+            while _sandy_resolve "$BOX_NAME" >/dev/null 2>&1; do BOX_NAME=$(_sandy_gen_name); done
+            local box_file; box_file="$(_sandy_boxes_dir)/$BOX_SHORTID.json"
+
+            # Cleanup trap: remove per-instance transient files + the sandy box record; wipe the whole
+            # dir if ephemeral. Bakes current values so the trap stays valid after _vm_prepare returns.
             trap '
               for pf in "'"$INST_DIR"'"/*.pid; do
                 [ -e "$pf" ] || continue
                 kill "$(cat "$pf")" 2>/dev/null || true
               done
               rm -f "'"$INST_DIR"'"/*.pid "'"$INST_DIR"'"/*.sock "'"$INST_DIR"'"/instance.lock
+              rm -f "'"$box_file"'"
               [ "'"$persistent"'" = 1 ] || rm -rf "'"$INST_DIR"'"
             ' EXIT INT TERM
+
+            # Register the box with sandy (~/.config/.sandy/boxes/) so `vm list`/`vm attach` see it.
+            # rvport stays empty until a reverse tunnel exists (Phase 2). The trap above removes the
+            # record on exit; `vm list` prunes dead records as a crash backstop.
+            local _hv _created _sess
+            [ "$OS" = "Darwin" ] && _hv=vfkit || _hv=qemu
+            _created=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+            _sess="''${TERM_SESSION_ID:-$(tty 2>/dev/null || echo '?')}:$$"
+            _sandy_write_box "$BOX_SHORTID" "$BOX_NAME" "$name" "$INST_DIR" "$$" "$_hv" "" "$_created" "$_sess"
 
             mkdir -p "$base_dir"
             # Persist this launch's grant so `vm doctor` can honour the same agent trust when it
@@ -1019,6 +1040,7 @@ in
             else
               echo "→ Launching VM '$name' (instance ''${INST_DIR##*/})… (poweroff inside to stop)"
             fi
+            echo "   sandy id: $BOX_NAME  ($BOX_SHORTID)"
             "$RUNNER"
           }
 
@@ -1040,6 +1062,7 @@ in
             local b64cmd
             b64cmd=$(printf '%s' "$cmd" | base64 | tr -d '\n')
             echo "→ Running in '$name' (instance ''${INST_DIR##*/})…"
+            echo "   sandy id: $BOX_NAME  ($BOX_SHORTID)"
             python3 ${./vm-console-run.py} "$RUNNER" "$b64cmd"
           }
 
@@ -1111,6 +1134,18 @@ in
                 echo "  $name  [stopped]"
               fi
             done
+
+            _sandy_prune
+            echo "Running sandboxes:"
+            local _any=0 _bf
+            for _bf in "$(_sandy_boxes_dir)"/*.json; do
+              [ -e "$_bf" ] || continue
+              _any=1
+              printf '  %s  (%s)  vm=%s  pid=%s\n' \
+                "$(_sandy_field "$_bf" id_name)" "$(_sandy_field "$_bf" short_id)" \
+                "$(_sandy_field "$_bf" vm_name)" "$(_sandy_field "$_bf" pid)"
+            done
+            [ "$_any" = 1 ] || echo "  (none)"
           }
 
           # Is a runner process live for this VM? (matches the per-instance/base dir in the cmdline)
