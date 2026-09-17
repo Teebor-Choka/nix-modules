@@ -904,8 +904,8 @@ in
           }
 
           # Ensure the single shared host tunnel sshd (Darwin/vfkit only): a forward-only sshd bound to
-          # the vfkit gateway 192.168.65.1:$SANDY_TSSHPORT, authorizing exactly the keys the forwarded
-          # agent holds. Each guest dials it and requests `-R <rvport>:localhost:22`; `vm attach`
+          # the detected vmnet gateway (_vfkit_gateway):$SANDY_TSSHPORT, authorizing exactly the keys
+          # the forwarded agent holds. Each guest dials it and requests `-R <rvport>:localhost:22`; `vm attach`
           # connects to 127.0.0.1:<rvport>. One per host, started idempotently; a retry loop rebinds
           # when the gateway interface (re)appears, mirroring the agent bridge. Gated on the `agent`
           # grant (the tunnel needs the forwarded agent) so `--isolated` launches opt out.
@@ -925,11 +925,10 @@ in
             # the surrounding indented-string formatting). Leading whitespace is tolerated by sshd.
             printf '%s\n' \
               "Port $SANDY_TSSHPORT" \
-              "ListenAddress 192.168.65.1" \
               "HostKey $dir/hostkey" \
               "AuthorizedKeysFile $dir/authorized_keys" \
+              "PidFile none" \
               "StrictModes no" \
-              "UsePAM no" \
               "PasswordAuthentication no" \
               "KbdInteractiveAuthentication no" \
               "AllowTcpForwarding remote" \
@@ -946,11 +945,17 @@ in
               if [ -f "$loop_pid" ] && kill -0 "$(cat "$loop_pid" 2>/dev/null)" 2>/dev/null; then
                 : # already running — one shared sshd serves every box
               else
-                # 192.168.65.1 only exists once a guest is up; retry-bind in a loop (sshd -D
-                # foregrounds; the loop restarts it if the address is not yet/no longer present).
-                ( while :; do $SANDY_SSHD -D -f "$dir/sshd_config" 2>>"$dir/sshd.err"; sleep 2; done ) &
+                # The vmnet bridge gateway only exists once a guest is up and its address varies by
+                # host/vfkit version, so detect it each iteration (exactly like the agent bridge) and
+                # bind it via -o. sshd -D foregrounds; the loop rebinds if the address is not yet/no
+                # longer present. ListenAddress is intentionally NOT in the config file.
+                ( while :; do
+                    gw=$(_vfkit_gateway) || { sleep 2; continue; }
+                    $SANDY_SSHD -D -o "ListenAddress=$gw" -f "$dir/sshd_config" 2>>"$dir/sshd.err"
+                    sleep 2
+                  done ) &
                 echo $! > "$loop_pid"
-                echo "→ sandy tunnel sshd started (192.168.65.1:$SANDY_TSSHPORT)"
+                echo "→ sandy tunnel sshd started (port $SANDY_TSSHPORT)"
               fi
             fi
           }
