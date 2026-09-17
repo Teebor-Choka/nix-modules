@@ -127,5 +127,18 @@ out=$("$vm" run --cpu 0 smoke true 2>&1); rc=$?
 out=$("$vm" run --mem abc smoke true 2>&1); rc=$?
 { [ "$rc" = 2 ] && grep -qi 'positive integer' <<<"$out"; } && ok "--mem non-numeric → exit 2" || bad "mem nan"
 
+# ── --tun-passthrough flag (parse + debug-grant reflects it; usage lists it) ────
+out=$("$vm" --help 2>&1); rc=$?
+{ [ "$rc" = 0 ] && grep -q 'tun-passthrough' <<<"$out"; } && ok "usage lists --tun-passthrough" || bad "usage tun-passthrough"
+
+out=$(VM_DEBUG_GRANT=1 "$vm" run --tun-passthrough smoke true 2>&1); rc=$?
+{ [ "$rc" = 0 ] && grep -qx 'tun-passthrough: on' <<<"$out"; } && ok "--tun-passthrough → on" || bad "tun-passthrough on"
+
+out=$(VM_DEBUG_GRANT=1 "$vm" run smoke true 2>&1); rc=$?
+{ [ "$rc" = 0 ] && grep -qx 'tun-passthrough: off' <<<"$out"; } && ok "no flag → tun-passthrough off" || bad "tun-passthrough off"
+
+out=$(VM_DEBUG_GRANT=1 "$vm" up --tun-passthrough smoke 2>&1); rc=$?
+{ [ "$rc" = 0 ] && grep -qx 'tun-passthrough: on' <<<"$out"; } && ok "up --tun-passthrough → on" || bad "up tun-passthrough"
+
 echo "── nix-vm CLI suite: $pass passed, $fail failed ──"
 [ "$fail" = 0 ]
