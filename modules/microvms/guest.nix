@@ -17,7 +17,8 @@ let
   stateDir = "${hostHome}/.local/state/microvm/${vmName}";
 
   # sandy reverse-tunnel: the shared host tunnel-sshd port (KEEP IN SYNC with the SANDY_TSSHPORT
-  # bash constant in default.nix). The guest dials 192.168.65.1:<this> using the forwarded agent.
+  # bash constant in default.nix). The guest dials its default gateway on <this> using the
+  # forwarded agent.
   sandyTunnelPort = 20022;
 
   # Share the host /nix/store read-only (vs a per-VM EROFS image). Immutable → safe across
@@ -325,6 +326,9 @@ in
         wants = [ "ssh-agent-bridge-ready.service" ];
         requires = [ "ssh-agent-bridge-ready.service" ];
         wantedBy = [ "multi-user.target" ];
+        # Retry forever: the host tunnel sshd may not be up yet when the guest boots (retry-bind
+        # race), so never let systemd's start-limit give up on this unit.
+        startLimitIntervalSec = 0;
         serviceConfig = {
           Type = "simple";
           Environment = "SSH_AUTH_SOCK=/run/ssh-agent/agent.sock";
@@ -338,11 +342,16 @@ in
             hex=$(printf '%s' "$mac" | ${pkgs.coreutils}/bin/tr -d ':' | ${pkgs.coreutils}/bin/tr 'A-F' 'a-f')
             hex=''${hex: -6}                              # last 3 octets
             rvport=$(( 21000 + (16#$hex % 2000) ))        # MUST match sandy-lib.sh _sandy_rvport_for_mac
+            # The host tunnel sshd binds the vmnet bridge gateway, whose address varies by host/vfkit
+            # version (192.168.64.1 on current macOS) — read it from the guest's route table, exactly
+            # as the SSH-agent bridge does; never hardcode it.
+            gw=$(${pkgs.iproute2}/bin/ip route show default | ${pkgs.gawk}/bin/awk '{print $3; exit}')
+            [ -n "$gw" ] || { echo "sandy-tunnel: no default gateway found" >&2; exit 1; }
             exec ${pkgs.openssh}/bin/ssh -N \
               -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
               -R "$rvport:localhost:22" -p ${toString sandyTunnelPort} \
-              ${vmSpec.user}@192.168.65.1
+              ${vmSpec.user}@"$gw"
           '';
         };
       };
