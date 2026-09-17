@@ -677,8 +677,11 @@ in
           #   MOUNT_SRC    --mount host dir (abs) or defaultMount; empty = no mount
           #   CPU/MEM_OVERRIDE  --cpu/--mem for this launch; empty = keep the VM's built-in vcpu/mem
           #   mode/csv     trust flag mode + explicit --trust csv;  env_prefix  --env exports (run)
-          GRANT=""; MOUNT_SRC=""; CPU_OVERRIDE=""; MEM_OVERRIDE=""
+          GRANT=""; MOUNT_SRC=""; CPU_OVERRIDE=""; MEM_OVERRIDE=""; TUN_PASSTHROUGH=0
           mode=default; csv=""; env_prefix=""
+
+          # Path to the standalone Tailscale CLI (macsys cask). Only used by --tun-passthrough (Darwin).
+          SANDY_TS="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 
           # Validate a positive integer argument (rc 2 otherwise). $1 flag-name $2 value.
           _pos_int() {
@@ -718,6 +721,15 @@ in
           # Space-list membership test: _in_list <needle> <item…>
           _in_list() { local n=$1; shift; local x; for x in $*; do [ "$x" = "$n" ] && return 0; done; return 1; }
 
+          # Print (comma-separated) the IPv4 subnet-route CIDRs the host's tailscale currently carries —
+          # the ranges a guest needs an explicit route for under --tun-passthrough (tailnet peer IPs in
+          # 100.64.0.0/10 already work via gvproxy). Empty if tailscale is down / advertises none. The
+          # JSON parsing lives in a file (tailscale-routes.py) so no column-0 Python breaks this string.
+          _tailscale_routes() {
+            [ -x "$SANDY_TS" ] || return 0
+            "$SANDY_TS" status --json 2>/dev/null | python3 ${./tailscale-routes.py} 2>/dev/null
+          }
+
           # Apply the VM's defaultMount as the mount source when `shares` is granted and no explicit
           # --mount was given. Explicit --mount (MOUNT_SRC already set) and --isolated (no `shares`)
           # both leave MOUNT_SRC untouched. Reads GRANT + VM_DEFAULT_MOUNT.
@@ -738,6 +750,7 @@ in
             echo "mount: ''${MOUNT_SRC:-<none>}"
             echo "cpu: ''${CPU_OVERRIDE:-<default>}"
             echo "mem: ''${MEM_OVERRIDE:-<default>}"
+            echo "tun-passthrough: $([ "$TUN_PASSTHROUGH" = 1 ] && echo on || echo off)"
           }
 
           # Parse the leading launch options shared by `vm up` and `vm run`; sets mode/csv/MOUNT_SRC/
@@ -745,7 +758,7 @@ in
           # command) in PARSE_REST. $1 = context ("up" rejects --env; "run" accepts it). rc 2 on error.
           _parse_launch_opts() {
             local ctx=$1; shift
-            mode=default; csv=""; MOUNT_SRC=""; CPU_OVERRIDE=""; MEM_OVERRIDE=""; env_prefix=""
+            mode=default; csv=""; MOUNT_SRC=""; CPU_OVERRIDE=""; MEM_OVERRIDE=""; env_prefix=""; TUN_PASSTHROUGH=0
             while [ $# -gt 0 ]; do
               case "$1" in
                 --trusted)  mode=trusted;  shift ;;
@@ -758,6 +771,7 @@ in
                 --cpu=*)    CPU_OVERRIDE=$(_pos_int --cpu "''${1#--cpu=}") || return 2; shift ;;
                 --mem)      MEM_OVERRIDE=$(_pos_int --mem "''${2:?'--mem needs a positive integer (MiB)'}") || return 2; shift 2 ;;
                 --mem=*)    MEM_OVERRIDE=$(_pos_int --mem "''${1#--mem=}") || return 2; shift ;;
+                --tun-passthrough) TUN_PASSTHROUGH=1; shift ;;
                 --env | --env=*)
                   [ "$ctx" = run ] || { echo "✗ --env is supported only on 'vm run' (vm up is an interactive login)" >&2; return 2; }
                   case "$1" in
@@ -808,6 +822,8 @@ in
             --mount <hostdir>     Share <hostdir> into the guest for this launch (RW; overrides defaultMount)
             --cpu N               Override the guest vCPU count for this launch
             --mem MiB             Override the guest memory (MiB) for this launch
+            --tun-passthrough     Route the guest into the host's current Tailscale mesh (vfkit only):
+                                  reach tailnet servers via the host's authenticated tunnel
             test  <name> [secs]   Headless smoke-test: boot to multi-user then tear down (exit 0=pass)
             down  <name>          Stop the shared SSH-agent bridge for a VM
             list                  Show defined VMs, bridge status, and running sandboxes (with ids)
@@ -1076,6 +1092,23 @@ in
               [ -n "$MEM_OVERRIDE" ] && { mem_pat="-m ''${MEM_OVERRIDE}M";    edits+=(-e "s/-m [0-9][0-9]*M/$mem_pat/"); }
             fi
 
+            # --tun-passthrough: let the guest reach the host tailnet's servers. Tailnet peer IPs
+            # (100.64.0.0/10) already work via gvproxy; the host's advertised RFC1918 subnet routes need
+            # an explicit guest route. Enumerate them from the host tailscale and inject them on the
+            # kernel cmdline; the guest's sandy-tunpass unit adds `ip route … via <gw>` for each. No NAT
+            # or host config needed — proven live. Whatever mesh the host is logged into is reached.
+            if [ "$TUN_PASSTHROUGH" = 1 ]; then
+              if [ "$OS" != "Darwin" ]; then
+                echo "⚠  --tun-passthrough is vfkit/macOS-only — ignoring" >&2
+              else
+                local _tsr; _tsr=$(_tailscale_routes)
+                [ -n "$_tsr" ] || echo "⚠  --tun-passthrough: host tailscale carries no subnet routes — is it up and logged in with a subnet-router peer online? (tailnet peer IPs still reachable)" >&2
+                local _routes="100.64.0.0/10''${_tsr:+,$_tsr}"
+                edits+=(-e "s| init=| sandy.tunpass=1 sandy.tunroutes=$_routes init=|")
+                echo "→ tun-passthrough: guest will route → $_routes (via host tailnet)"
+              fi
+            fi
+
             [ ''${#edits[@]} -gt 0 ] && _patch_runner "''${edits[@]}"
 
             # Verify the cpu/mem overrides actually landed — a runner-format drift must surface, not
@@ -1096,6 +1129,7 @@ in
               MOUNT_SRC="''${VM_MOUNT_OVERRIDE:-}"
               CPU_OVERRIDE="''${VM_CPU_OVERRIDE:-}"
               MEM_OVERRIDE="''${VM_MEM_OVERRIDE:-}"
+              TUN_PASSTHROUGH="''${VM_TUN_PASSTHROUGH:-0}"
             else
               _parse_launch_opts up "$@" || return 2
               set -- "''${PARSE_REST[@]}"
@@ -1111,7 +1145,7 @@ in
               command -v python3 >/dev/null 2>&1 \
                 || { echo "✗ vm up needs python3 to allocate a PTY (vfkit requires a TTY for the serial console)" >&2; return 2; }
               exec env VM_GRANT_OVERRIDE="$GRANT" VM_GRANT_OVERRIDE_SET=1 VM_MOUNT_OVERRIDE="$MOUNT_SRC" \
-                VM_CPU_OVERRIDE="$CPU_OVERRIDE" VM_MEM_OVERRIDE="$MEM_OVERRIDE" \
+                VM_CPU_OVERRIDE="$CPU_OVERRIDE" VM_MEM_OVERRIDE="$MEM_OVERRIDE" VM_TUN_PASSTHROUGH="$TUN_PASSTHROUGH" \
                 python3 -c 'import pty,sys; pty.spawn(sys.argv[1:])' "$0" up "$name"
             fi
             _vm_prepare "$name" || return ''${?}

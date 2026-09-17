@@ -356,6 +356,41 @@ in
         };
       };
 
+  # ── sandy --tun-passthrough: when the launcher injects `sandy.tunpass=1` on the kernel cmdline,
+  #    route this guest into the host's current Tailscale mesh. Tailnet peer IPs (100.64.0.0/10) are
+  #    already reachable via the vmnet NAT (proven); this adds the host's advertised RFC1918 subnet
+  #    routes (`sandy.tunroutes=<csv>`) via the default gateway so tailnet *servers* are reachable, and
+  #    points MagicDNS at the tailnet resolver. No credentials or tailscaled run in the guest — the
+  #    host's authenticated tunnel does the work. Inert unless the flag is on the cmdline.
+  systemd.services.sandy-tunpass = {
+    description = "sandy tailnet passthrough routes (guest → host tailnet)";
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
+    wantedBy = [ "multi-user.target" ];
+    unitConfig.ConditionKernelCommandLine = "sandy.tunpass";
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = pkgs.writeShellScript "sandy-tunpass" ''
+        set -u
+        dr=$(${pkgs.iproute2}/bin/ip route show default | ${pkgs.coreutils}/bin/head -1)
+        gw=$(printf '%s' "$dr" | ${pkgs.gawk}/bin/awk '{print $3}')
+        dev=$(printf '%s' "$dr" | ${pkgs.gawk}/bin/awk '{print $5}')
+        [ -n "$gw" ] || { echo "sandy-tunpass: no default gateway" >&2; exit 1; }
+        routes=$(${pkgs.gnused}/bin/sed -n 's/.*sandy\.tunroutes=\([^ ]*\).*/\1/p' /proc/cmdline)
+        [ -n "$routes" ] || { echo "sandy-tunpass: no sandy.tunroutes on cmdline" >&2; exit 0; }
+        IFS=,
+        for cidr in $routes; do
+          [ -n "$cidr" ] || continue
+          ${pkgs.iproute2}/bin/ip route replace "$cidr" via "$gw" && echo "sandy-tunpass: + $cidr via $gw"
+        done
+        unset IFS
+        # Best-effort MagicDNS: let *.ts.net / tailnet names resolve via the tailnet resolver.
+        [ -n "$dev" ] && ${pkgs.systemd}/bin/resolvectl dns "$dev" 100.100.100.100 2>/dev/null || true
+      '';
+    };
+  };
+
   # GitHub SSH host keys — pre-trusted so home.gitClone over SSH doesn't fail on first boot.
   # Writes to /etc/ssh/ssh_known_hosts (system-wide). Rotate if GitHub announces a key change.
   programs.ssh.knownHosts = {
