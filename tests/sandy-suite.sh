@@ -59,5 +59,24 @@ _sandy_prune
 [ ! -f "$SANDY_HOME/boxes/deadbeef.json" ] && ok "prune drops dead-pid box" || bad "prune dead"
 [ -f "$SANDY_HOME/boxes/livelive.json" ]   && ok "prune keeps live-pid box" || bad "prune live"
 
+# 6) rvport derivation: deterministic, in range, and matches a hand-computed value.
+r1=$(_sandy_rvport_for_mac 02:ab:cd:11:22:33)
+r2=$(_sandy_rvport_for_mac 02:AB:CD:11:22:33)   # case-insensitive
+check "rvport deterministic (case-insensitive)" "$r1" "$r2"
+want=$(( 21000 + (16#112233 % 2000) ))
+check "rvport matches formula" "$want" "$r1"
+[ "$r1" -ge 21000 ] && [ "$r1" -lt 23000 ] && ok "rvport in range" || bad "rvport range ($r1)"
+# distinct MACs differ (last-3-octets differ)
+r3=$(_sandy_rvport_for_mac 02:00:00:44:55:66)
+[ "$r1" != "$r3" ] && ok "distinct MACs → distinct rvports" || bad "rvport collision on distinct MACs"
+
+# 7) rvport-in-use: true for a live box holding the port, false when excluded or dead.
+_sandy_write_box aaaa1111 a-a-a-a-a claude /st/a "$$"   vfkit 21500 t t
+_sandy_write_box bbbb2222 b-b-b-b-b claude /st/b "$dead" vfkit 21600 t t
+_sandy_rvport_in_use 21500 && ok "rvport_in_use → true for live holder" || bad "rvport_in_use live"
+_sandy_rvport_in_use 21500 "$SANDY_HOME/boxes/aaaa1111.json" && bad "rvport_in_use should exclude self" || ok "rvport_in_use excludes self"
+_sandy_rvport_in_use 21600 && bad "rvport_in_use should ignore dead box" || ok "rvport_in_use ignores dead holder"
+_sandy_rvport_in_use 29999 && bad "rvport_in_use unused port" || ok "rvport_in_use → false for free port"
+
 echo "── sandy suite: $pass passed, $fail failed ──"
 [ "$fail" = 0 ]

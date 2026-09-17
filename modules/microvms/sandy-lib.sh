@@ -29,6 +29,22 @@ _sandy_boxes_dir() { printf '%s/boxes' "$(_sandy_home)"; }
 # _sandy_gen_shortid → 8 lowercase hex chars.
 _sandy_gen_shortid() { od -An -N4 -tx1 /dev/urandom | tr -d ' \n'; }
 
+# Reverse-tunnel port range on the shared host tunnel sshd. Each box's `ssh -R <rvport>:localhost:22`
+# lands on a port in [SANDY_RVBASE, SANDY_RVBASE+SANDY_RVRANGE). host and guest MUST derive the same
+# rvport from the same NIC MAC — hence one shared formula, used by both sides.
+SANDY_RVBASE=21000
+SANDY_RVRANGE=2000
+
+# _sandy_rvport_for_mac <mac> → the deterministic rvport for a NIC MAC (e.g. 02:ab:cd:11:22:33).
+# The host derives it from the MAC it assigns/reads; the guest derives it from /sys/.../address.
+# Collisions among concurrent instances are resolved host-side (regenerate the MAC).
+_sandy_rvport_for_mac() {
+  local hex
+  hex=$(printf '%s' "$1" | tr -d ':' | tr 'A-F' 'a-f')
+  hex=${hex: -6}                                   # last 3 octets → 24 bits of entropy
+  printf '%d' $(( SANDY_RVBASE + (16#$hex % SANDY_RVRANGE) ))
+}
+
 # _sandy_gen_name → five words joined by '-' (e.g. twinkly is not in the pool; e.g. "otter-maple-…").
 _sandy_gen_name() {
   local n=${#SANDY_WORDS[@]} out="" i idx
@@ -78,6 +94,19 @@ _sandy_prune() {
     [ -e "$f" ] || continue
     _sandy_box_alive "$f" || rm -f "$f"
   done
+}
+
+# _sandy_rvport_in_use <rvport> [exclude_file] → true if a LIVE box already holds this rvport
+# (ignoring `exclude_file`). Used host-side to bump an ephemeral MAC until its derived port is free.
+_sandy_rvport_in_use() {
+  local want=$1 excl=${2:-} f
+  for f in "$(_sandy_boxes_dir)"/*.json; do
+    [ -e "$f" ] || continue
+    [ "$f" = "$excl" ] && continue
+    [ "$(_sandy_field "$f" rvport)" = "$want" ] || continue
+    _sandy_box_alive "$f" && return 0
+  done
+  return 1
 }
 
 # _sandy_resolve <short_id|id_name> → prints the matching box file path, or returns 1.

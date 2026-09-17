@@ -642,6 +642,15 @@ in
           # sandy orchestration: box identity + registry helpers (pure; unit-tested in tests/sandy-suite.sh).
           ${builtins.readFile ./sandy-lib.sh}
 
+          # sandy reverse-tunnel: the shared host tunnel-sshd port (KEEP IN SYNC with guest.nix
+          # sandyTunnelPort) and absolute openssh binaries — sshd's re-exec requires an absolute path,
+          # so we bake store paths rather than rely on PATH.
+          SANDY_TSSHPORT=20022
+          SANDY_SSHD="${pkgs.openssh}/bin/sshd"
+          SANDY_SSH="${pkgs.openssh}/bin/ssh"
+          SANDY_SSHKEYGEN="${pkgs.openssh}/bin/ssh-keygen"
+          SANDY_SSHADD="${pkgs.openssh}/bin/ssh-add"
+
           # vsock port per VM name — baked in at Nix build time (Linux qemu bridge)
           declare -A VM_VSOCK_PORTS=(${vmPortsStr})
 
@@ -789,6 +798,7 @@ in
             build <name>          Build VM guest image (run before first up, or after rebuild)
             up    [opts] <name>          Start VM interactively (attaches serial console)
             run   [opts] <name> <cmd…>   Boot headlessly, run a command, stream output, return exit code
+            attach <id|name> [cmd…]      Open a shell in a running box by its sandy id (multi-attach)
 
           Launch options (before <name>; isolated by default — nothing granted unless asked):
             --trusted             Grant every capability this VM declares (secrets + agent + shares)
@@ -800,7 +810,7 @@ in
             --mem MiB             Override the guest memory (MiB) for this launch
             test  <name> [secs]   Headless smoke-test: boot to multi-user then tear down (exit 0=pass)
             down  <name>          Stop the shared SSH-agent bridge for a VM
-            list                  Show defined VMs and bridge status
+            list                  Show defined VMs, bridge status, and running sandboxes (with ids)
             doctor [--watch [s]] [name…]
                                   Verify + self-heal the SSH-agent bridge of running VM(s)
             builder <cmd>         Manage the vfkit linux-builder (macOS): up|down|status|logs
@@ -893,6 +903,58 @@ in
             fi
           }
 
+          # Ensure the single shared host tunnel sshd (Darwin/vfkit only): a forward-only sshd bound to
+          # the vfkit gateway 192.168.65.1:$SANDY_TSSHPORT, authorizing exactly the keys the forwarded
+          # agent holds. Each guest dials it and requests `-R <rvport>:localhost:22`; `vm attach`
+          # connects to 127.0.0.1:<rvport>. One per host, started idempotently; a retry loop rebinds
+          # when the gateway interface (re)appears, mirroring the agent bridge. Gated on the `agent`
+          # grant (the tunnel needs the forwarded agent) so `--isolated` launches opt out.
+          _ensure_tunnel_sshd() {
+            [ "$OS" = "Darwin" ] || return 0
+            _in_list agent "$GRANT" || return 0
+            local dir="$HOME/.local/state/microvm/tunnel"
+            mkdir -p "$dir"; chmod 700 "$dir"
+            # Refresh authorized_keys from the live agent each launch (keys may have been added since).
+            if ! $SANDY_SSHADD -L > "$dir/authorized_keys" 2>/dev/null || [ ! -s "$dir/authorized_keys" ]; then
+              echo "⚠  sandy: agent holds no keys (ssh-add -L empty) — attach tunnel not started" >&2
+              return 0
+            fi
+            chmod 600 "$dir/authorized_keys"
+            [ -f "$dir/hostkey" ] || $SANDY_SSHKEYGEN -q -t ed25519 -N "" -f "$dir/hostkey"
+            # Forward-only sshd config (printf, not a heredoc: a col-0 heredoc terminator would break
+            # the surrounding indented-string formatting). Leading whitespace is tolerated by sshd.
+            printf '%s\n' \
+              "Port $SANDY_TSSHPORT" \
+              "ListenAddress 192.168.65.1" \
+              "HostKey $dir/hostkey" \
+              "AuthorizedKeysFile $dir/authorized_keys" \
+              "StrictModes no" \
+              "UsePAM no" \
+              "PasswordAuthentication no" \
+              "KbdInteractiveAuthentication no" \
+              "AllowTcpForwarding remote" \
+              "GatewayPorts no" \
+              "PermitTTY no" \
+              "X11Forwarding no" \
+              "AllowAgentForwarding no" \
+              "PrintMotd no" \
+              "PermitRootLogin no" \
+              > "$dir/sshd_config"
+            local loop_pid="$dir/loop.pid" lock_dir="$dir/sshd.lock"
+            if mkdir "$lock_dir" 2>/dev/null; then
+              trap 'rmdir "'"$lock_dir"'" 2>/dev/null || true' RETURN
+              if [ -f "$loop_pid" ] && kill -0 "$(cat "$loop_pid" 2>/dev/null)" 2>/dev/null; then
+                : # already running — one shared sshd serves every box
+              else
+                # 192.168.65.1 only exists once a guest is up; retry-bind in a loop (sshd -D
+                # foregrounds; the loop restarts it if the address is not yet/no longer present).
+                ( while :; do $SANDY_SSHD -D -f "$dir/sshd_config" 2>>"$dir/sshd.err"; sleep 2; done ) &
+                echo $! > "$loop_pid"
+                echo "→ sandy tunnel sshd started (192.168.65.1:$SANDY_TSSHPORT)"
+              fi
+            fi
+          }
+
           # Prepare a VM instance: create the per-instance working dir, install the cleanup trap,
           # start the shared SSH-agent bridge, run the consumer hostPreLaunch hook, and copy+patch
           # the runner script with a per-instance random MAC (ephemeral VMs only).
@@ -940,20 +1002,12 @@ in
               [ "'"$persistent"'" = 1 ] || rm -rf "'"$INST_DIR"'"
             ' EXIT INT TERM
 
-            # Register the box with sandy (~/.config/.sandy/boxes/) so `vm list`/`vm attach` see it.
-            # rvport stays empty until a reverse tunnel exists (Phase 2). The trap above removes the
-            # record on exit; `vm list` prunes dead records as a crash backstop.
-            local _hv _created _sess
-            [ "$OS" = "Darwin" ] && _hv=vfkit || _hv=qemu
-            _created=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
-            _sess="''${TERM_SESSION_ID:-$(tty 2>/dev/null || echo '?')}:$$"
-            _sandy_write_box "$BOX_SHORTID" "$BOX_NAME" "$name" "$INST_DIR" "$$" "$_hv" "" "$_created" "$_sess"
-
             mkdir -p "$base_dir"
             # Persist this launch's grant so `vm doctor` can honour the same agent trust when it
             # later repairs the (per-VM, shared) bridge. Reflects the most recent launch of the VM.
             printf '%s' "$GRANT" > "$base_dir/.launch-grant"
             _ensure_agent_bridge "$name" "$base_dir"
+            _ensure_tunnel_sshd  # shared host sshd for `vm attach` reverse tunnels (Darwin/vfkit)
 
             # Consumer host hook (credential staging, etc.); runs with CWD = INST_DIR and $name set.
             case "$name" in
@@ -973,7 +1027,28 @@ in
             #   mount     point the launchmount share's source at --mount/defaultMount (empty otherwise).
             #   cpu/mem   engine-specific (vfkit --cpus/--memory; qemu -smp/-m<N>M).
             local -a edits=()
-            [ "$persistent" != 1 ] && edits+=(-e "s|mac=([0-9a-f]{2}:){5}[0-9a-f]{2}|mac=$(_rand_mac)|")
+            # Determine this instance's NIC MAC and derive its reverse-tunnel port from it — host and
+            # guest derive the SAME rvport from the SAME MAC (see sandy-lib.sh / guest.nix). Ephemeral
+            # instances get a fresh MAC; bump it until the derived rvport is free among live boxes.
+            local mac rvport
+            if [ "$persistent" != 1 ]; then
+              mac=$(_rand_mac); rvport=$(_sandy_rvport_for_mac "$mac")
+              while _sandy_rvport_in_use "$rvport" "$box_file"; do
+                mac=$(_rand_mac); rvport=$(_sandy_rvport_for_mac "$mac")
+              done
+              edits+=(-e "s|mac=([0-9a-f]{2}:){5}[0-9a-f]{2}|mac=$mac|")
+            else
+              mac=$(grep -oE 'mac=([0-9a-f]{2}:){5}[0-9a-f]{2}' "$INST_DIR/microvm-run" | head -1 | sed 's/^mac=//')
+              rvport=$(_sandy_rvport_for_mac "$mac")
+            fi
+
+            # Register the box with sandy now that its rvport is known, so `vm list`/`vm attach` see it.
+            # The cleanup trap removes the record on every exit path; `vm list` prunes dead records.
+            local _hv _created _sess
+            [ "$OS" = "Darwin" ] && _hv=vfkit || _hv=qemu
+            _created=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")
+            _sess="''${TERM_SESSION_ID:-$(tty 2>/dev/null || echo '?')}:$$"
+            _sandy_write_box "$BOX_SHORTID" "$BOX_NAME" "$name" "$INST_DIR" "$$" "$_hv" "$rvport" "$_created" "$_sess"
 
             if [ "''${VM_LAUNCH_MOUNT[$name]:-0}" = 1 ]; then
               mkdir -p "$INST_DIR/mount" # relative share source; empty dir = isolated default
@@ -1040,7 +1115,7 @@ in
             else
               echo "→ Launching VM '$name' (instance ''${INST_DIR##*/})… (poweroff inside to stop)"
             fi
-            echo "   sandy id: $BOX_NAME  ($BOX_SHORTID)"
+            echo "   sandy id: $BOX_NAME  ($BOX_SHORTID)  —  attach elsewhere: vm attach $BOX_SHORTID"
             "$RUNNER"
           }
 
@@ -1064,6 +1139,27 @@ in
             echo "→ Running in '$name' (instance ''${INST_DIR##*/})…"
             echo "   sandy id: $BOX_NAME  ($BOX_SHORTID)"
             python3 ${./vm-console-run.py} "$RUNNER" "$b64cmd"
+          }
+
+          # Attach a shell to an already-running box over its reverse tunnel (Darwin/vfkit). Read-only:
+          # never calls _vm_prepare, so it cannot start a second instance or touch instance.lock. With
+          # a trailing command it runs that non-interactively; without one it opens an interactive shell.
+          # Multi-attach is native — several `vm attach` sessions can share one running box.
+          vm_attach() {
+            local key=''${1:?'Usage: vm attach <id|name> [command…]'}; shift
+            _sandy_prune
+            local box; box=$(_sandy_resolve "$key") \
+              || { echo "✗ no running box matches '$key' (see: vm list)" >&2; return 1; }
+            local rv hv vm idn
+            rv=$(_sandy_field "$box" rvport); hv=$(_sandy_field "$box" hypervisor)
+            vm=$(_sandy_field "$box" vm_name); idn=$(_sandy_field "$box" id_name)
+            if [ "$hv" != vfkit ] || [ -z "$rv" ]; then
+              echo "✗ attach unavailable for '$idn' (vm=$vm, hypervisor=$hv)" >&2; return 2
+            fi
+            echo "→ attaching to '$idn' (vm=$vm) via 127.0.0.1:$rv …" >&2
+            exec $SANDY_SSH -p "$rv" \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+              "$USER@127.0.0.1" "$@"
           }
 
           vm_build() {
@@ -1202,6 +1298,7 @@ in
             build) vm_build "''${2:?'Usage: vm build <name>'}"; ;;
             up)    shift; vm_up  "$@"; ;;
             run)   shift; vm_run "$@"; ;;
+            attach) shift; vm_attach "$@"; ;;
             test)  vm_test "''${2:?'Usage: vm test <name> [timeout_s]'}" "''${3:-}"; ;;
             down)  vm_down "''${2:?'Usage: vm down <name>'}"; ;;
             list)  vm_list; ;;
