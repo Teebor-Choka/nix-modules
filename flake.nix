@@ -475,6 +475,23 @@
             bash -n ${./tests/vm-smoke-suite.sh}
             touch "$out"
           '';
+
+          # Unit regression for the SSH-agent relay staleness decision (agent-bridge-lib.sh):
+          # a live relay pointing at a rotated-away host agent socket must be restarted, not
+          # reused. Pure filesystem + a throwaway unix socket — no VM. See tests/agent-bridge-suite.sh.
+          agent-bridge =
+            pkgs.runCommand "agent-bridge"
+              {
+                nativeBuildInputs = [
+                  pkgs.bash
+                  pkgs.coreutils
+                  pkgs.python3
+                ];
+              }
+              ''
+                bash ${./tests/agent-bridge-suite.sh} ${./modules/microvms/agent-bridge-lib.sh}
+                touch "$out"
+              '';
         }
         # The PTY-driven console suite and the host-eval CLI suite are Linux-only: they need a
         # working /dev/ptmx and process tools inside the build sandbox. The GitHub macOS runner's
