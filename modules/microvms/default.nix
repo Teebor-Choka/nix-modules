@@ -636,6 +636,9 @@ in
           DEFINED_VMS="${vmNamesStr}"
           OS=$(uname -s)
 
+          # SSH-agent relay lifecycle helpers (pure; unit-tested in tests/agent-bridge-suite.sh).
+          ${builtins.readFile ./agent-bridge-lib.sh}
+
           # vsock port per VM name — baked in at Nix build time (Linux qemu bridge)
           declare -A VM_VSOCK_PORTS=(${vmPortsStr})
 
@@ -835,13 +838,28 @@ in
               return 0
             fi
             local pid_file="$base_dir/agent-bridge.pid"
+            local target_file="$base_dir/agent-bridge.target"
             local lock_dir="$base_dir/agent-bridge.lock"
             # Atomic mkdir critical section — prevents a start race when many instances launch at once.
             if mkdir "$lock_dir" 2>/dev/null; then
               trap 'rmdir "'"$lock_dir"'" 2>/dev/null || true' RETURN
-              if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file" 2>/dev/null)" 2>/dev/null; then
+              # A live relay is reusable only if it still bridges the CURRENT $SSH_AUTH_SOCK. The
+              # macOS launchd agent socket rotates across login sessions, so a relay from an earlier
+              # session keeps holding the port while dialing a vanished socket — replace it.
+              local action; action=$(_agent_bridge_decide "$pid_file" "$target_file" "$SSH_AUTH_SOCK")
+              if [ "$action" = reuse ]; then
                 echo "→ SSH-agent bridge already running (pid $(cat "$pid_file"))"
               else
+                if [ "$action" = restart ]; then
+                  # Tear down the stale relay: socat child first (while its retry loop still lives,
+                  # so it can't respawn), then the loop itself.
+                  local old; old=$(cat "$pid_file" 2>/dev/null || true)
+                  if [ -n "$old" ]; then
+                    pkill -P "$old" 2>/dev/null || true
+                    kill "$old" 2>/dev/null || true
+                  fi
+                  echo "→ SSH-agent bridge target changed — restarting (was pid ''${old:-?})"
+                fi
                 if [ "$OS" = "Darwin" ]; then
                   # vfkit user-mode NAT: TCP relay bound to the detected vmnet bridge gateway (VSOCK
                   # broken in 0.6.x). The gateway/interface only exists once a guest is running, so
@@ -859,6 +877,7 @@ in
                         UNIX-CONNECT:"$SSH_AUTH_SOCK" &
                 fi
                 echo $! > "$pid_file"
+                printf '%s' "$SSH_AUTH_SOCK" > "$target_file"
                 echo "→ SSH-agent bridge started (pid $!)"
               fi
             else
@@ -1130,11 +1149,11 @@ in
                 GRANT=$(cat "$base_dir/.launch-grant" 2>/dev/null || echo "")
                 if ! _in_list agent "$GRANT"; then echo "· $name: SSH agent withheld at launch — skip"; continue; fi
                 local gw; gw=$(_vfkit_gateway 2>/dev/null || echo '?')
-                if _bridge_bound "$port"; then
+                if _bridge_bound "$port" && _agent_bridge_target_alive "$base_dir/agent-bridge.target"; then
                   echo "✓ $name: bridge healthy ($gw:$port)"
                 else
-                  echo "→ $name: running but bridge down ($gw:$port) — repairing…"
-                  rm -f "$base_dir/agent-bridge.pid"
+                  echo "→ $name: running but bridge down or stale ($gw:$port) — repairing…"
+                  rm -f "$base_dir/agent-bridge.pid" "$base_dir/agent-bridge.target"
                   rmdir "$base_dir/agent-bridge.lock" 2>/dev/null || true
                   _ensure_agent_bridge "$name" "$base_dir"
                 fi
