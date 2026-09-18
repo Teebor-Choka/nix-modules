@@ -1117,32 +1117,12 @@ in
           }
 
           vm_up() {
-            # A PTY re-exec (below) carries the already-resolved grant + mount + cpu/mem via env;
-            # skip re-parsing then, otherwise parse the shared launch options (--env rejected on up).
-            if [ "''${VM_GRANT_OVERRIDE_SET:-}" = 1 ]; then
-              GRANT="''${VM_GRANT_OVERRIDE:-}"
-              MOUNT_SRC="''${VM_MOUNT_OVERRIDE:-}"
-              CPU_OVERRIDE="''${VM_CPU_OVERRIDE:-}"
-              MEM_OVERRIDE="''${VM_MEM_OVERRIDE:-}"
-              TUN_PASSTHROUGH="''${VM_TUN_PASSTHROUGH:-0}"
-            else
-              _parse_launch_opts up "$@" || return 2
-              set -- "''${PARSE_REST[@]}"
-            fi
+            _parse_launch_opts up "$@" || return 2
+            set -- "''${PARSE_REST[@]}"
             local name=''${1:?'Usage: vm up [trust] [--mount DIR] [--cpu N] [--mem MiB] <name>'}
-            if [ "''${VM_GRANT_OVERRIDE_SET:-}" != 1 ]; then
-              GRANT=$(_resolve_grant "$mode" "$csv" "''${VM_TRUST_DEFAULT[$name]:-}") || return 2
-              _resolve_default_mount "$name"
-            fi
+            GRANT=$(_resolve_grant "$mode" "$csv" "''${VM_TRUST_DEFAULT[$name]:-}") || return 2
+            _resolve_default_mount "$name"
             [ "''${VM_DEBUG_GRANT:-}" = 1 ] && { _debug_grant; return 0; }
-            # vfkit's virtio-serial,stdio requires a real TTY. Re-exec through a PTY when stdin is not one.
-            if [ "$OS" = "Darwin" ] && ! [ -t 0 ]; then
-              command -v python3 >/dev/null 2>&1 \
-                || { echo "✗ vm up needs python3 to allocate a PTY (vfkit requires a TTY for the serial console)" >&2; return 2; }
-              exec env VM_GRANT_OVERRIDE="$GRANT" VM_GRANT_OVERRIDE_SET=1 VM_MOUNT_OVERRIDE="$MOUNT_SRC" \
-                VM_CPU_OVERRIDE="$CPU_OVERRIDE" VM_MEM_OVERRIDE="$MEM_OVERRIDE" VM_TUN_PASSTHROUGH="$TUN_PASSTHROUGH" \
-                python3 -c 'import pty,sys; pty.spawn(sys.argv[1:])' "$0" up "$name"
-            fi
             _vm_prepare "$name" || return ''${?}
             if [ "''${VM_PERSISTENT[$name]:-0}" = 1 ]; then
               echo "→ Launching persistent VM '$name'… (poweroff inside to stop)"
@@ -1150,7 +1130,18 @@ in
               echo "→ Launching VM '$name' (instance ''${INST_DIR##*/})… (poweroff inside to stop)"
             fi
             echo "   sandy id: $BOX_NAME  ($BOX_SHORTID)  —  attach elsewhere: vm attach $BOX_SHORTID"
-            "$RUNNER"
+            # vfkit's virtio-serial,stdio needs a real TTY, so run it under the interactive PTY
+            # console driver (Darwin): it gives the guest its TTY on every launch (interactive or
+            # not) and, when we're on a terminal, puts our stdin in raw mode so Ctrl-C/Ctrl-Z reach
+            # the guest shell as bytes over the serial console instead of signalling this launcher —
+            # which would tear the sandbox down. Replaces the old `pty.spawn` re-exec.
+            if [ "$OS" = "Darwin" ]; then
+              command -v python3 >/dev/null 2>&1 \
+                || { echo "✗ vm up needs python3 for the PTY console (vfkit requires a TTY)" >&2; return 2; }
+              python3 ${./vm-console-up.py} "$RUNNER"
+            else
+              "$RUNNER"
+            fi
           }
 
           vm_run() {
