@@ -535,6 +535,25 @@
                 touch "$out"
               '';
 
+          # Behavioral regression suite for the `vm up` interactive console driver: exit-code
+          # propagation, Ctrl-C forwarded to the guest as a byte (not a host signal that would kill
+          # the sandbox), and stdin-EOF not killing a live guest. Drives the real driver against
+          # fake PTY runners, no VM needed. See tests/console-up-suite.sh.
+          vm-console-up =
+            pkgs.runCommand "vm-console-up"
+              {
+                nativeBuildInputs = [
+                  pkgs.python3
+                  pkgs.bash
+                  pkgs.coreutils
+                  pkgs.gnugrep
+                ];
+              }
+              ''
+                bash ${./tests/console-up-suite.sh} ${./modules/microvms/vm-console-up.py}
+                touch "$out"
+              '';
+
           # Black-box CLI dispatch tests for the `vm` helper (usage, unknown cmd, list,
           # doctor-skips-not-running, builder macOS-only gate). See tests/nix-vm-cli-suite.sh.
           vm-cli =
