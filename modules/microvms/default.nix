@@ -1011,17 +1011,12 @@ in
             while _sandy_resolve "$BOX_NAME" >/dev/null 2>&1; do BOX_NAME=$(_sandy_gen_name); done
             local box_file; box_file="$(_sandy_boxes_dir)/$BOX_SHORTID.json"
 
-            # Cleanup trap: remove per-instance transient files + the sandy box record; wipe the whole
-            # dir if ephemeral. Bakes current values so the trap stays valid after _vm_prepare returns.
-            trap '
-              for pf in "'"$INST_DIR"'"/*.pid; do
-                [ -e "$pf" ] || continue
-                kill "$(cat "$pf")" 2>/dev/null || true
-              done
-              rm -f "'"$INST_DIR"'"/*.pid "'"$INST_DIR"'"/*.sock "'"$INST_DIR"'"/instance.lock
-              rm -f "'"$box_file"'"
-              [ "'"$persistent"'" = 1 ] || rm -rf "'"$INST_DIR"'"
-            ' EXIT INT TERM
+            # Cleanup trap: on real teardown, drop this instance's helper pids + transient files +
+            # the sandy record, and wipe the dir if ephemeral. Guarded inside _sandy_reap_box so a
+            # stray INT/TERM to the launcher while the guest is still running is a NO-OP — it must
+            # not orphan a live box (delete its record) or rm -rf a live guest's /home. Values baked
+            # in so the trap stays valid after _vm_prepare returns.
+            trap '_sandy_reap_box "'"$box_file"'" "'"$INST_DIR"'" "'"$persistent"'"' EXIT INT TERM
 
             mkdir -p "$base_dir"
             # Persist this launch's grant so `vm doctor` can honour the same agent trust when it
