@@ -51,7 +51,16 @@ def main() -> None:
 
     pid, master_fd = pty.fork()
     if pid == 0:
-        # Child: the runner's stdio is the PTY slave.
+        # Child: the runner's stdio is the PTY slave. Put the slave in raw mode BEFORE exec: vfkit
+        # does not touch its console tty, so a slave left in the default cooked line discipline would
+        # turn a forwarded ^C/^Z/^\ into a signal for vfkit ITSELF (SIGINT → vfkit powers the guest
+        # off — "Ctrl-C kills the VM"). Raw (-isig, -icanon, -opost) makes vfkit shuttle those bytes
+        # verbatim to the guest serial line, where the guest's own tty handles signals. Best effort:
+        # if it fails we still exec (no worse than before).
+        try:
+            tty.setraw(0)
+        except (termios.error, OSError):
+            pass
         os.execv(runner, [runner])
         os._exit(127)  # unreachable unless execv fails
 
