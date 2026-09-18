@@ -179,6 +179,13 @@ in
     ])
     ++ vmSpec.extraPackages pkgs; # consumer additions, resolved against the guest's pkgs
 
+  # ── Terminfo: `vm attach` is plain SSH, so it forwards the operator's $TERM (e.g. xterm-ghostty,
+  #    xterm-kitty) into the guest. Ship the terminfo of the common terminal emulators so those
+  #    sessions render correctly instead of garbling on an unknown terminal. (The `vm up` serial
+  #    console is unaffected — the guest getty sets its own TERM there.) mkDefault so an
+  #    ultra-minimal consumer can turn it back off.
+  environment.enableAllTerminfo = lib.mkDefault true;
+
   # ── Nix settings
   nix.package = pkgs.nix;
   nix.settings = {
