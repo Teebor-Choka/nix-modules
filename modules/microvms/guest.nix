@@ -183,8 +183,48 @@ in
   #    xterm-kitty) into the guest. Ship the terminfo of the common terminal emulators so those
   #    sessions render correctly instead of garbling on an unknown terminal. (The `vm up` serial
   #    console is unaffected — the guest getty sets its own TERM there.) mkDefault so an
-  #    ultra-minimal consumer can turn it back off.
+  #    ultra-minimal consumer can turn it back off. NOTE: on vfkit these files alone are not enough
+  #    — see terminfo-casehack-fix below.
   environment.enableAllTerminfo = lib.mkDefault true;
+
+  # ── Terminfo case-hack workaround (vfkit / macOS host only).
+  #    The guest mounts the host's macOS /nix/store (case-insensitive APFS) over virtio-fs, where
+  #    Nix's `use-case-hack` has renamed colliding single-letter terminfo dirs — e.g. the uppercase
+  #    `X/` (X-hpterm…) keeps its name while lowercase `x/` becomes `x~nix~case~hack~1/`. ncurses
+  #    looks entries up at `<dir>/<first-char>/<name>`, so every `x*` term (xterm, xterm-256color,
+  #    xterm-ghostty) — and a/e/l/m/n/p/q entries — is unfindable, and `vm attach` garbles.
+  #    The guest root FS is case-sensitive, so rebuild a case-correct symlink tree at boot (strip the
+  #    `~nix~case~hack~N` suffix, letting `x` and `X` coexist) and point TERMINFO at it. Runs before
+  #    logins so an attach session always sees a resolvable database.
+  systemd.services.terminfo-casehack-fix = lib.mkIf (vmSpec.hypervisor == "vfkit") {
+    description = "Rebuild a case-correct terminfo tree (macOS case-hacked /nix/store workaround)";
+    wantedBy = [ "multi-user.target" ];
+    before = [ "systemd-user-sessions.service" ];
+    path = [ pkgs.coreutils ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    script = ''
+      set -u
+      src=/run/current-system/sw/share/terminfo
+      dest=/run/terminfo
+      rm -rf "$dest"; mkdir -p "$dest"
+      [ -d "$src" ] || exit 0
+      for d in "$src"/*/; do
+        d=''${d%/}
+        corrected=''${d##*/}; corrected=''${corrected%%~nix~case~hack~*}
+        mkdir -p "$dest/$corrected"
+        for f in "$d"/*; do
+          [ -e "$f" ] || continue
+          ln -sfn "$f" "$dest/$corrected/''${f##*/}"
+        done
+      done
+    '';
+  };
+  # Point ncurses at the corrected tree first (single-dir $TERMINFO wins over $TERMINFO_DIRS).
+  # sessionVariables (not variables) to avoid colliding with the SSH_AUTH_SOCK block below.
+  environment.sessionVariables.TERMINFO = lib.mkIf (vmSpec.hypervisor == "vfkit") "/run/terminfo";
 
   # ── Nix settings
   nix.package = pkgs.nix;
