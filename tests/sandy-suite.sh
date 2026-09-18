@@ -78,5 +78,52 @@ _sandy_rvport_in_use 21500 "$SANDY_HOME/boxes/aaaa1111.json" && bad "rvport_in_u
 _sandy_rvport_in_use 21600 && bad "rvport_in_use should ignore dead box" || ok "rvport_in_use ignores dead holder"
 _sandy_rvport_in_use 29999 && bad "rvport_in_use unused port" || ok "rvport_in_use → false for free port"
 
+# 8) guest_alive: true only for a live vfkit/qemu whose argv carries the instance dir; false when
+#    absent, and false for a non-hypervisor process even if its argv contains the dir (specificity).
+if command -v pgrep >/dev/null 2>&1; then
+  gi="$SANDY_HOME/i-live";  mkdir -p "$gi"
+  gh="$SANDY_HOME/i-other"; mkdir -p "$gh"
+  # Fake long-lived processes whose argv carries the inst dir. Scripts named after the real
+  # binaries, run via `bash <script> <arg>` so the argv is unambiguous (nixpkgs coreutils is a
+  # multicall binary, so `exec -a` would misdispatch). One looks like a hypervisor, one does not.
+  printf '#!/usr/bin/env bash\nsleep 300\n' > "$SANDY_HOME/vfkit"; chmod +x "$SANDY_HOME/vfkit"
+  printf '#!/usr/bin/env bash\nsleep 300\n' > "$SANDY_HOME/socat"; chmod +x "$SANDY_HOME/socat"
+  bash "$SANDY_HOME/vfkit" "--restful-uri" "unix://$gi/x.sock" & gpid=$!
+  bash "$SANDY_HOME/socat" "$gh/agent.sock"                     & hpid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -f "vfkit.*$gi" >/dev/null 2>&1 && break; sleep 0.1; done
+  _sandy_guest_alive "$gi"              && ok "guest_alive → true for live vfkit"          || bad "guest_alive missed a live vfkit"
+  _sandy_guest_alive "$SANDY_HOME/nope" && bad "guest_alive false-positive on absent inst" || ok "guest_alive → false when no guest"
+  _sandy_guest_alive "$gh"              && bad "guest_alive matched a non-hypervisor"       || ok "guest_alive → false for non-hypervisor with dir in argv"
+  pkill -P "$gpid,$hpid" 2>/dev/null || true; kill "$gpid" "$hpid" 2>/dev/null || true
+  wait "$gpid" "$hpid" 2>/dev/null || true
+else
+  ok "guest_alive tests skipped (no pgrep in sandbox)"
+fi
+
+# 9) reap_box guards teardown on a LIVE guest — the core regression: a stray INT/TERM must not
+#    orphan a running box or wipe its /home. Stub _sandy_guest_alive so the guard is deterministic
+#    (independent of real processes); this section runs last so no restore is needed.
+mk_inst() { mkdir -p "$1"; : > "$1/home.img"; }
+
+_sandy_guest_alive() { return 0; }   # pretend the guest is still running
+_sandy_write_box livebox0 a-b-c-d-e claude "$SANDY_HOME/i-alive" 4242 vfkit 21001 t t
+mk_inst "$SANDY_HOME/i-alive"
+_sandy_reap_box "$SANDY_HOME/boxes/livebox0.json" "$SANDY_HOME/i-alive" 0
+[ -f "$SANDY_HOME/boxes/livebox0.json" ] && ok "reap keeps record while guest alive"  || bad "reap deleted a live box (orphan!)"
+[ -d "$SANDY_HOME/i-alive" ]             && ok "reap keeps inst dir while guest alive" || bad "reap wiped a live guest's dir"
+
+_sandy_guest_alive() { return 1; }   # guest gone
+_sandy_write_box ephbox00 a-b-c-d-e claude "$SANDY_HOME/i-eph" 4242 vfkit 21001 t t
+mk_inst "$SANDY_HOME/i-eph"
+_sandy_reap_box "$SANDY_HOME/boxes/ephbox00.json" "$SANDY_HOME/i-eph" 0
+[ ! -f "$SANDY_HOME/boxes/ephbox00.json" ] && ok "reap drops record when guest gone"        || bad "reap kept a dead box"
+[ ! -d "$SANDY_HOME/i-eph" ]               && ok "reap wipes ephemeral inst dir when gone"  || bad "reap left an ephemeral dir"
+
+_sandy_write_box perbox00 a-b-c-d-e claude "$SANDY_HOME/i-persist" 4242 vfkit 21001 t t
+mk_inst "$SANDY_HOME/i-persist"
+_sandy_reap_box "$SANDY_HOME/boxes/perbox00.json" "$SANDY_HOME/i-persist" 1
+[ ! -f "$SANDY_HOME/boxes/perbox00.json" ] && ok "reap drops record (persistent)"       || bad "reap kept a dead box (persistent)"
+[ -d "$SANDY_HOME/i-persist" ]             && ok "reap preserves persistent inst dir"   || bad "reap wiped a persistent dir"
+
 echo "── sandy suite: $pass passed, $fail failed ──"
 [ "$fail" = 0 ]

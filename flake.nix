@@ -504,6 +504,7 @@
                   pkgs.coreutils
                   pkgs.gnugrep
                   pkgs.gnused
+                  pkgs.procps # pgrep, for the _sandy_guest_alive liveness check
                 ];
               }
               ''

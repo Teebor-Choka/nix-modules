@@ -2,9 +2,10 @@
 #
 # `sandy` is the orchestrator that tracks running sandboxes ("boxes"). Each running box gets a
 # unique identity (a five-word name + an 8-hex short id) and a record under ~/.config/.sandy/boxes/.
-# These helpers are side-effect-free w.r.t. VM state and depend only on the filesystem + `kill -0`,
-# so they are unit-tested without a hypervisor (see tests/sandy-suite.sh). Inlined into nix-vm at
-# build time via `builtins.readFile`; sourced directly by the test. Function/array definitions only.
+# These helpers depend only on the filesystem, `kill -0`, and `pgrep` (guest liveness), so they are
+# unit-tested without a hypervisor (see tests/sandy-suite.sh). Most are side-effect-free w.r.t. VM
+# state; `_sandy_reap_box` is the teardown path and mutates local instance state. Inlined into nix-vm
+# at build time via `builtins.readFile`; sourced directly by the test. Function/array definitions only.
 #
 # Records are flat JSON (one field per line) so they can be read without jq: `_sandy_field` extracts
 # a value with sed. Values must not contain `"` or `,` — box fields (ids, vm names, store paths,
@@ -119,4 +120,34 @@ _sandy_resolve() {
     [ "$(_sandy_field "$f" id_name)" = "$1" ] && { printf '%s' "$f"; return 0; }
   done
   return 1
+}
+
+# _sandy_guest_alive <inst_dir> → true if a hypervisor (vfkit/qemu) for THIS instance is still
+# running: its argv carries the instance dir (vfkit's --restful-uri, qemu's relative volume paths).
+# Gates teardown (see _sandy_reap_box). No pgrep on PATH → treated as not-alive, so teardown still
+# runs (matches the pre-guard behaviour). The inst dir is per-launch unique, so this never matches a
+# sibling instance of the same VM.
+_sandy_guest_alive() {
+  local inst=$1
+  [ -n "$inst" ] || return 1
+  command -v pgrep >/dev/null 2>&1 || return 1
+  pgrep -f "(vfkit|qemu).*$inst" >/dev/null 2>&1
+}
+
+# _sandy_reap_box <box_file> <inst_dir> [persistent] → tear down a box: kill its per-instance helper
+# pids, drop transient files + the sandy record, and (ephemeral only) wipe the instance dir. A
+# NO-OP while the guest is still running, so a stray INT/TERM to the launcher can't orphan a live
+# box (delete its record → invisible to `vm list`, unattachable) or rm -rf a live guest's /home. On
+# real teardown the hypervisor has already exited and this proceeds. Called from the _vm_prepare trap.
+_sandy_reap_box() {
+  local box=$1 inst=$2 persistent=${3:-0} pf
+  [ -n "$inst" ] || return 0
+  _sandy_guest_alive "$inst" && return 0
+  for pf in "$inst"/*.pid; do
+    [ -e "$pf" ] || continue
+    kill "$(cat "$pf")" 2>/dev/null || true
+  done
+  rm -f "$inst"/*.pid "$inst"/*.sock "$inst"/instance.lock
+  rm -f "$box"
+  [ "$persistent" = 1 ] || rm -rf "$inst"
 }
