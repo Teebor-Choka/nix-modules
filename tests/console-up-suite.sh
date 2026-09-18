@@ -34,14 +34,15 @@ to "$PY" "$driver" ./r-exit </dev/null >out1 2>err1; rc=$?
 grep -q BOOTED out1  && ok "runner stdout is bridged"       || bad "runner stdout not bridged"
 
 # ── 2) Ctrl-C is forwarded to the guest as a byte, not a signal (needs a PTY) ──
-# Fake runner mimics the guest console: announce, switch its tty to raw (-isig, like vfkit reading
-# the serial line), ARM, then read ONE raw byte with `od` and report its hex. `od` (unlike bash
-# `read -n`) does not re-enable ISIG, so a forwarded ^C stays a 0x03 byte. Two markers close the
-# race between arming raw mode and the ^C send.
+# The fake runner models vfkit: it does NOT touch its own tty (vfkit doesn't either). It relies on
+# the driver having put the PTY *slave* in raw mode; if the driver failed to, the slave's cooked
+# line discipline would turn the forwarded ^C into SIGINT for the runner (regression), which the
+# INT trap catches. On success ^C arrives as a raw 0x03 byte, read here with `od`. Two markers close
+# the race between the runner starting and the ^C send.
 cat > r-ctrlc <<EOF
 #!$BASH_BIN
+trap 'printf "GOT:SIGINT\r\n"; exit 42' INT
 echo READY
-stty raw -echo 2>/dev/null || true
 printf 'ARMED\r\n'
 b=\$(od -An -N1 -tx1 | tr -d ' \r\n')
 printf 'GOT:%s\r\n' "\$b"
@@ -92,8 +93,11 @@ sys.stderr.write(f"VERDICT signaled={int(signaled)} code={code}\n")
 PY
 grep -q "GOT:03" out2 && ok "Ctrl-C reaches the guest as byte 0x03" \
   || bad "Ctrl-C not forwarded (out: $(tr -d '\000' <out2 | tr '\r\n' '  '))"
-grep -q "VERDICT signaled=0 code=0" err2 && ok "driver survives Ctrl-C (exits cleanly, not signalled)" \
-  || bad "driver did not survive Ctrl-C ($(grep VERDICT err2 || echo 'no verdict'))"
+grep -q "GOT:SIGINT" out2 \
+  && bad "slave left cooked → ^C signalled the runner (the vfkit-killing regression)" \
+  || ok "^C did not raise a signal in the runner (slave is raw)"
+grep -q "VERDICT signaled=0 code=0" err2 && ok "driver + runner exit cleanly on Ctrl-C" \
+  || bad "unclean exit on Ctrl-C ($(grep VERDICT err2 || echo 'no verdict'))"
 
 # ── 3) our stdin EOF must not kill a still-running guest ──────────────────────
 cat > r-eof <<EOF
