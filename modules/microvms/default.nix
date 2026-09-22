@@ -1031,8 +1031,19 @@ in
             esac
 
             # Build (or use cached) runner, copy to instance dir to make it writable for patching.
+            # --out-link registers a per-INSTANCE indirect GC root ($INST_DIR/gcroot) pinning the
+            # runner's closure — which contains the guest system toplevel, the same closure vm_build
+            # roots by name. This keeps every store path the running guest serves over the read-only
+            # /nix/store virtiofs share alive for as long as the instance dir exists, so a name-level
+            # rebuild (which re-points the shared microvm-$name root) or nix.gc.automatic can't reap
+            # them out from under a live guest. macOS has no /proc, so nix's GC cannot otherwise treat
+            # the vfkit process's open store files as roots — collecting them gives the guest ESTALE
+            # ("stale file handle") on the vanished paths. Ephemeral teardown's `rm -rf "$INST_DIR"`
+            # drops the link (nix reaps the dangling auto-root); persistent VMs keep it across `vm up`
+            # and overwrite it on the next launch, which also restores the build-cache reuse.
             local runner_pkg
-            runner_pkg=$(nix build --no-link --print-out-paths "$FLAKE#microvm-$name")
+            nix build --out-link "$INST_DIR/gcroot" "$FLAKE#microvm-$name"
+            runner_pkg=$(readlink "$INST_DIR/gcroot")
             cp -L "$runner_pkg/bin/microvm-run" "$INST_DIR/microvm-run"
             chmod u+wx "$INST_DIR/microvm-run"  # cp -L preserves nix store 0500; need +w to allow mv to overwrite
 
