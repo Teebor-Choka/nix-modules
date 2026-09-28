@@ -59,7 +59,10 @@
   programs.zsh.syntaxHighlighting.enable = true;
   programs.zsh.autosuggestions.enable = true;
 
-  environment.shellAliases.rebuild-me = "sudo nixos-rebuild switch --flake ${config.custom.flakeDir}";
+  # cd into the flake dir before sudo: nixos-rebuild spawns subprocesses as root that
+  # inherit the invocation cwd, and getcwd() fails there if root can't resolve it —
+  # aborting the switch. The subshell keeps the caller's cwd untouched.
+  environment.shellAliases.rebuild-me = "( cd ${config.custom.flakeDir} && sudo nixos-rebuild switch --flake ${config.custom.flakeDir} )";
 
   # ── System state version — overridable so each host can pin its own original value
   system.stateVersion = lib.mkDefault "24.05";
