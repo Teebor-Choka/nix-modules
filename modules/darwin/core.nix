@@ -23,10 +23,10 @@
   programs.bash.completion.enable = true;
 
   environment.systemPackages = with pkgs; [ mkalias ];
-  # cd into the flake dir before sudo: darwin-rebuild spawns bash/nix subprocesses
-  # as root that inherit the invocation cwd, and getcwd() fails there if root can't
-  # resolve it — aborting the switch. The subshell keeps the caller's cwd untouched.
-  environment.shellAliases.rebuild-me = "( cd ${config.custom.flakeDir} && sudo darwin-rebuild switch --flake ${config.custom.flakeDir} )";
+  environment.shellAliases.rebuild-me = import ../lib/rebuild-alias.nix {
+    flakeDir = config.custom.flakeDir;
+    tool = "darwin";
+  };
 
   security.pam.services.sudo_local.touchIdAuth = true;
 
