@@ -511,6 +511,29 @@
                 bash ${./tests/sandy-suite.sh} ${./modules/microvms/sandy-lib.sh}
                 touch "$out"
               '';
+
+          # Regression guard for the rebuild-me alias (modules/lib/rebuild-alias.nix): it must cd
+          # into the flake dir before sudo so the rebuild works from ANY directory, not only the
+          # flake dir. Asserted through the shared helper directly — the darwin host can't be
+          # evaluated here (nix-darwin is not an input). Fails under the old bare `sudo
+          # <tool>-rebuild switch` form, which had no cd guard.
+          rebuild-alias =
+            let
+              mkRebuildAlias = import ./modules/lib/rebuild-alias.nix;
+              fd = "/flake";
+              guarded =
+                tool:
+                lib.hasInfix "cd ${fd} && sudo ${tool}-rebuild switch --flake ${fd}" (mkRebuildAlias {
+                  flakeDir = fd;
+                  inherit tool;
+                });
+            in
+            pkgs.runCommand "rebuild-alias" { } (
+              assert guarded "darwin" && guarded "nixos";
+              ''
+                echo "rebuild-me cd's into the flake dir before sudo (darwin + nixos)" > "$out"
+              ''
+            );
         }
         # The PTY-driven console suite and the host-eval CLI suite are Linux-only: they need a
         # working /dev/ptmx and process tools inside the build sandbox. The GitHub macOS runner's
