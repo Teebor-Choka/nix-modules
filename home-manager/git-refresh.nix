@@ -1,11 +1,13 @@
 # home-manager/git-refresh.nix
 # Companion to `home.gitClone` (git-clone.nix): gitClone clones each repo once and never touches
 # it again; this module keeps those checkouts current. On every activation it updates each existing
-# clone to its latest upstream — SAFELY. It always `fetch`es, but only fast-forwards the checked-out
-# branch when the working tree is clean; a dirty, diverged, or detached repo is fetched-only and left
-# untouched, so local work is never discarded. Repos marked `readOnly` are instead hard-reset to the
-# upstream tip on every activation (see git-clone.nix); repos you work in advance only on a trivial
-# fast-forward.
+# clone to its latest upstream — SAFELY. It always `fetch`es, fast-forwards the checked-out branch
+# only when the working tree is clean, and fast-forwards the local default branch (without touching
+# the working tree) whenever it is not the checked-out one. A dirty default branch, or a diverged
+# one, is left untouched with a warning, so local work is never discarded. The per-repo logic is in
+# git-refresh-lib.sh (unit-tested by tests/git-refresh-suite.sh). Repos marked `readOnly` are
+# instead hard-reset to the upstream tip on every activation (see git-clone.nix); repos you work in
+# advance only on a trivial fast-forward.
 #
 # Runs after the `gitClone` activation node and in the SAME activation shell, so it inherits the SSH
 # env (GIT_SSH_COMMAND + launchctl SSH_AUTH_SOCK) that node exports — fetches over SSH just work,
@@ -39,7 +41,8 @@ in
     # run in parallel; `wait` blocks until they finish. The subshell also scopes `target`, so the
     # parallel jobs don't race on a shared variable.
     home.activation.gitRefresh = lib.hm.dag.entryAfter [ "gitClone" ] (
-      concatStringsSep "\n" (
+      ". ${./git-refresh-lib.sh}\n"
+      + concatStringsSep "\n" (
         mapAttrsToList (relPath: repo: ''
           (
             target="$HOME/${relPath}"
@@ -70,20 +73,7 @@ in
                   ''
                 else
                   ''
-                    if [ -z "$(${git} -C "$target" status --porcelain 2>/dev/null)" ]; then
-                      if $DRY_RUN_CMD ${git} -C "$target" merge --ff-only --quiet '@{u}' 2>/dev/null; then
-                        after="$(${git} -C "$target" rev-parse --short HEAD 2>/dev/null)"
-                        if [ "$before" = "$after" ]; then
-                          echo "gitRefresh: ${relPath} up to date ($after)"
-                        else
-                          echo "gitRefresh: ${relPath} fast-forward $before -> $after"
-                        fi
-                      else
-                        echo "gitRefresh: ${relPath} not fast-forwardable — left as-is"
-                      fi
-                    else
-                      echo "gitRefresh: ${relPath} has local changes — fetched only"
-                    fi
+                    GIT=${git} git_refresh_update "$target" "${relPath}"
                   ''
               }
             fi
