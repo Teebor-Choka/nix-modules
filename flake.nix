@@ -512,6 +512,25 @@
                 touch "$out"
               '';
 
+          # Unit regression for home.gitRefresh's per-repo update step (git-refresh-lib.sh): the
+          # default branch must advance even when a dirty feature branch is checked out, a dirty
+          # checked-out default warns, and a diverged default is never force-updated. Throwaway
+          # local git repos, no network. See tests/git-refresh-suite.sh.
+          git-refresh =
+            pkgs.runCommand "git-refresh"
+              {
+                nativeBuildInputs = [
+                  pkgs.bash
+                  pkgs.coreutils
+                  pkgs.gnugrep
+                  pkgs.git
+                ];
+              }
+              ''
+                bash ${./tests/git-refresh-suite.sh} ${./home-manager/git-refresh-lib.sh}
+                touch "$out"
+              '';
+
           # Regression guard for the rebuild-me alias (modules/lib/rebuild-alias.nix): it must cd
           # into the flake dir before sudo so the rebuild works from ANY directory, not only the
           # flake dir. Asserted through the shared helper directly — the darwin host can't be
