@@ -395,8 +395,25 @@ let
           Read-only Nix store base (shared safely across concurrent instances — it is immutable).
           "host" shares the host /nix/store via virtiofs (no per-VM store image → faster `vm up`;
           native on Linux; exposes the whole host store read-only). "image" builds a per-VM EROFS
-          image containing only this VM's closure (less exposure, slower rebuilds). The writable
-          store overlay is always per-instance RAM (rootfs tmpfs).
+          image containing only this VM's closure (less exposure, slower rebuilds). The backing of
+          the *writable* store overlay is a separate axis — see storeOverlayBacking.
+        '';
+      };
+
+      # ── Writable store overlay backing (ephemeral VMs) ─────────────────────────
+      storeOverlayBacking = mkOption {
+        type = types.enum [
+          "tmpfs"
+          "disk"
+        ];
+        default = "tmpfs";
+        description = ''
+          Backing for the writable store overlay (/nix/.rw-store) on ephemeral VMs. "tmpfs"
+          (default): the overlay upperdir lives on the root tmpfs, i.e. guest RAM capped at 50% of
+          `mem` — a large `nix develop` closure can exhaust it with ENOSPC. "disk": a per-instance
+          store.img of `storeSize` in the launch's working dir backs the overlay, wiped on exit like
+          an ephemeral home.img, so closures land on disk instead of RAM. Ignored when persistent
+          (those VMs always get a disk-backed, boot-surviving store.img at the fixed base dir).
         '';
       };
 

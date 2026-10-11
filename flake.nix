@@ -198,6 +198,7 @@
           mem = 4096;
           homeSize = 2048;
           storeSize = 2048;
+          storeOverlayBacking = "tmpfs";
           user = "tester";
           timeZone = "UTC";
           locale = "en_US.UTF-8";
@@ -274,6 +275,7 @@
         (mkGuest "aarch64-linux" (mkSpec {
           hypervisor = "vfkit";
         }))
+        diskOverlayGuest # ephemeral + disk-backed writable store overlay (store.img, wiped on exit)
         secretsGuest # secret injection wired (inject-secrets service + injected-secrets share)
         guestSSHGuest # guest sshd enabled + authorized key placed
       ];
@@ -300,6 +302,14 @@
         forwardSshAgent = false;
       });
       baseGuest = mkGuest "aarch64-linux" (mkSpec { }); # forwardSshAgent = true (default)
+      # storeOverlayBacking = "disk" on an ephemeral VM ⇒ a store.img volume backs the overlay.
+      diskOverlayGuest = mkGuest "aarch64-linux" (mkSpec {
+        storeOverlayBacking = "disk";
+      });
+      # persistent ⇒ store.img regardless of storeOverlayBacking (boot-surviving cache).
+      persistentGuest = mkGuest "aarch64-linux" (mkSpec {
+        persistent = true;
+      });
       # guestSSH.enable ⇒ sshd runs and the authorized key is placed on the guest user.
       guestSSHTestKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5TESTKEY tester@host";
       guestSSHGuest = mkGuest "aarch64-linux" (mkSpec {
@@ -327,6 +337,14 @@
             "guest authorized key placed when guestSSH.enable" =
               lib.elem guestSSHTestKey guestSSHGuest.config.users.users.tester.openssh.authorizedKeys.keys;
             "guest sshd absent by default" = !baseGuest.config.services.openssh.enable;
+            "writable store overlay on tmpfs by default (no store.img)" =
+              !(lib.any (v: v.image == "store.img") baseGuest.config.microvm.volumes);
+            "store.img backs overlay when ephemeral + storeOverlayBacking=disk" = lib.any (
+              v: v.image == "store.img" && v.mountPoint == "/nix/.rw-store"
+            ) diskOverlayGuest.config.microvm.volumes;
+            "persistent VM still gets store.img" = lib.any (
+              v: v.image == "store.img"
+            ) persistentGuest.config.microvm.volumes;
           };
           failures = lib.attrNames (lib.filterAttrs (_: ok: !ok) conditions);
         in

@@ -53,6 +53,14 @@ let
     else
       "disk";
 
+  # ── Writable store overlay backing ──────────────────────────────────────────────
+  # Persistent VMs always get a boot-surviving store.img at the base dir. Ephemeral VMs default to
+  # the root tmpfs (RAM) for the overlay, but can opt into a per-instance store.img
+  # (storeOverlayBacking = "disk") so a large `nix develop` closure lands on disk instead of RAM.
+  # The image path is relative, so on an ephemeral VM it lives in the launch's working dir and is
+  # wiped on exit — same mechanism as an ephemeral home.img.
+  storeOverlayOnDisk = vmSpec.persistent || vmSpec.storeOverlayBacking == "disk";
+
 in
 {
   imports = [
@@ -105,11 +113,12 @@ in
     };
 
   # ── Volumes (RELATIVE image paths → resolved against the launch's working dir):
-  #    - persistent VMs get a writable store.img (overlay persists → package cache) at the fixed
-  #      base dir; ephemeral VMs get no store.img (overlay lives on rootfs tmpfs, per-instance).
+  #    - a writable store.img backs the overlay when persistent (survives boots → package cache, at
+  #      the fixed base dir) OR when an ephemeral VM opts into storeOverlayBacking = "disk"
+  #      (per-instance, wiped on exit). Otherwise the ephemeral overlay lives on the rootfs tmpfs.
   #    - disk-mode /home gets a home.img (persistent at base dir, or per-instance & wiped).
   microvm.volumes =
-    lib.optional vmSpec.persistent {
+    lib.optional storeOverlayOnDisk {
       image = "store.img";
       mountPoint = "/nix/.rw-store";
       size = vmSpec.storeSize;
