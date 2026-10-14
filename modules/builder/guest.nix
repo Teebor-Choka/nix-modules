@@ -56,9 +56,23 @@ in
       image = "builder-nix-store.img";
       size = 30000;
     }
+    # Build scratch on a physical disk, not the RAM-backed rootfs tmpfs. nix builds
+    # stage under /tmp; the microvm store-disk erofs build assembles the whole guest
+    # closure under /tmp/.../store before mkfs.erofs, which a ~2 GB RAM rootfs cannot
+    # hold. A dedicated disk volume gives builds real space.
+    {
+      mountPoint = "/tmp";
+      image = "builder-tmp.img";
+      size = 40000;
+    }
   ];
 
   boot.initrd.systemd.enable = true;
+
+  # The /tmp disk volume persists across reboots (fixed builder state dir), so wipe
+  # its contents on every boot: each builder session starts with empty scratch and
+  # a dead session's build leftovers never accumulate.
+  boot.tmp.cleanOnBoot = true;
 
   networking.hostName = "linux-builder";
 
