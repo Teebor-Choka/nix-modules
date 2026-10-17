@@ -114,5 +114,14 @@ in
     max-free = 3 * 1024 * 1024 * 1024;
   };
 
+  # min-free/max-free above only trims during a build, once free space is already low.
+  # This is a standing weekly sweep of the writable store overlay (29G, no automatic
+  # resize), so an idle builder doesn't creep toward full between build sessions.
+  nix.gc = {
+    automatic = true;
+    dates = "weekly";
+    options = "-d";
+  };
+
   system.stateVersion = "24.05";
 }
