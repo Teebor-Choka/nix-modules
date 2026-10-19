@@ -277,6 +277,7 @@
         }))
         diskOverlayGuest # ephemeral + disk-backed writable store overlay (store.img, wiped on exit)
         secretsGuest # secret injection wired (inject-secrets service + injected-secrets share)
+        secretsEnvGuest # envName secret target (environment.d + injected-env.sh)
         guestSSHGuest # guest sshd enabled + authorized key placed
       ];
 
@@ -293,6 +294,26 @@
             target = {
               filePath = ".claude/.credentials.json";
               envName = null;
+            };
+          }
+        ];
+      });
+      # envName target: exercises the shellInit/environment.d side of inject-secrets, and is the
+      # fixture the inject-secrets-before-multi-user-target ordering check below runs against —
+      # vm-run's boot-ready signal is "multi-user.target reached" on the console, so if
+      # inject-secrets can still be running after that point, a command injected right at
+      # boot-ready can see the secret's env var unset (confirmed in practice: identical launches
+      # of the same VM, no sleep, read $VAR as present on one boot and empty on the next).
+      secretsEnvGuest = mkGuest "aarch64-linux" (mkSpec {
+        secrets = [
+          {
+            db = "/tmp/test.kdbx";
+            keychainDbPass = "test-svc";
+            entry = "Test/Entry";
+            attribute = "password";
+            target = {
+              filePath = null;
+              envName = "TEST_TOKEN";
             };
           }
         ];
@@ -328,6 +349,11 @@
             "injected-secrets share added when secrets set" = lib.any (
               s: s.tag == "injected-secrets"
             ) secretsGuest.config.microvm.shares;
+            # vm-run's boot-ready signal is "multi-user.target reached" on the console — if
+            # inject-secrets isn't ordered before that target, a command injected right at
+            # boot-ready can race it and see an envName secret's env var still unset.
+            "inject-secrets orders before multi-user.target (boot-ready race)" =
+              lib.elem "multi-user.target" secretsEnvGuest.config.systemd.services.inject-secrets.before;
             "ssh-agent-bridge-ready present when forwarding" =
               baseGuest.config.systemd.services ? ssh-agent-bridge-ready;
             "ssh-agent-bridge-ready absent when not forwarding" =
