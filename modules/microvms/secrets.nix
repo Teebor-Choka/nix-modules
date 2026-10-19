@@ -80,6 +80,11 @@ lib.mkIf (vmSpec.secrets != [ ]) {
   systemd.services.inject-secrets = {
     description = "Install per-VM secrets from virtiofs share, then wipe host copies";
     wantedBy = [ "multi-user.target" ];
+    # `vm run`'s boot-ready signal is "multi-user.target reached" on the console. Being
+    # wantedBy that target doesn't order us before it — without an explicit Before=, a command
+    # injected right at boot-ready can race this service and see an envName secret's env var
+    # still unset (confirmed: identical launches, no sleep, one boot has it, the next doesn't).
+    before = [ "multi-user.target" ];
     after = [ "home-manager-${user}.service" ];
     path = [ pkgs.coreutils ];
     serviceConfig = {
