@@ -152,7 +152,17 @@ let
         in
         ''
           fetch_secret_${idx}() {
-          ${keepassxcFetch spec.keepassxcCli (builtins.removeAttrs secret [ "target" ])}
+          ${
+            if secret.command != null then
+              secret.command
+            else
+              keepassxcFetch spec.keepassxcCli (
+                builtins.removeAttrs secret [
+                  "target"
+                  "command"
+                ]
+              )
+          }
           }
           rm -f secrets/secret-${idx} secrets/secret-${idx}.new
           if ( fetch_secret_${idx} ) > secrets/secret-${idx}.new 2>/dev/null \
@@ -496,16 +506,27 @@ let
         type = types.listOf (
           types.submodule {
             options = {
+              command = mkOption {
+                type = types.nullOr types.str;
+                default = null;
+                description = ''
+                  Host shell command whose stdout is the secret value (e.g. "gh auth token"). Set
+                  this OR the KeePassXC triple (db/keychainDbPass/entry), not both.
+                '';
+              };
               db = mkOption {
-                type = types.str;
-                description = "Path to the KDBX file (host shell expands $HOME).";
+                type = types.nullOr types.str;
+                default = null;
+                description = "Path to the KDBX file (host shell expands $HOME). KeePassXC source.";
               };
               keychainDbPass = mkOption {
-                type = types.str;
+                type = types.nullOr types.str;
+                default = null;
                 description = "Host secret-store key holding the KDBX passphrase: macOS Keychain service name, or Linux secret-tool `service` attribute.";
               };
               entry = mkOption {
-                type = types.str;
+                type = types.nullOr types.str;
+                default = null;
                 description = ''KeePassXC entry path; UI '>' group separator becomes '/' (e.g. "Network/Services/ClaudeCode").'';
               };
               attribute = mkOption {
@@ -617,6 +638,16 @@ in
             imap0 (i: s: {
               assertion = (s.target.filePath != null) != (s.target.envName != null);
               message = "microVM '${name}': secrets[${toString i}].target must set exactly one of 'filePath' or 'envName'.";
+            }) spec.secrets
+          ) cfg
+        )
+        # Each secret sets exactly one source: a host command, or the KeePassXC triple.
+        ++ concatLists (
+          mapAttrsToList (
+            name: spec:
+            imap0 (i: s: {
+              assertion = (s.command != null) != (s.db != null && s.keychainDbPass != null && s.entry != null);
+              message = "microVM '${name}': secrets[${toString i}] must set exactly one source — 'command' or the KeePassXC triple (db/keychainDbPass/entry).";
             }) spec.secrets
           ) cfg
         )
