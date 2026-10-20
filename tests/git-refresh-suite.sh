@@ -121,5 +121,52 @@ new_case dry; advance_origin 1; git -C "$c/repo" checkout -q -b feat
 main_before=$(head_of main); DRY_RUN_CMD=echo refresh; unset DRY_RUN_CMD
 check "dry run: main untouched" "$main_before" "$(head_of main)"
 
+# 11) clean on a feature branch already merged (ancestor of origin/main): retargeted to main.
+new_case retarget-merged; git -C "$c/repo" checkout -q -b feat; commit "$c/repo" feat.txt feat
+git -C "$c/repo" push -q origin feat:main; git -C "$c/pusher" pull -q origin main; refresh
+check "retarget merged: on main" main "$(git -C "$c/repo" branch --show-current)"
+check "retarget merged: HEAD == origin/main" "$(head_of origin/main)" "$(head_of HEAD)"
+check "retarget merged: feat branch kept" yes "$(git -C "$c/repo" show-ref -q --verify refs/heads/feat && echo yes || echo no)"
+has "retarget merged: says so" "retargeted feat -> main" "$out"
+
+# 12) clean on a squash-merged feature branch (not an ancestor): retargeted when gh reports a merged
+#     PR whose head is this commit. A fake gh prints $FAKE_GH_OIDS.
+fakebin=$root/fakebin; mkdir -p "$fakebin"
+printf '#!/bin/sh\nprintf "%%s\\n" $FAKE_GH_OIDS\n' > "$fakebin/gh"; chmod +x "$fakebin/gh"
+squash_case() { # <name> — feat has 2 commits; main gets a squash of them plus one more commit
+  new_case "$1"; git -C "$c/repo" checkout -q -b feat
+  commit "$c/repo" a.txt a1; commit "$c/repo" b.txt b1
+  printf '%s\n' a1 > "$c/pusher/a.txt"; printf '%s\n' b1 > "$c/pusher/b.txt"
+  git -C "$c/pusher" add a.txt b.txt; git -C "$c/pusher" commit -q -m squash; advance_origin 1
+}
+squash_case retarget-squash
+FAKE_GH_OIDS="deadbeef $(head_of HEAD)" GH=$fakebin/gh refresh
+check "retarget squash: on main" main "$(git -C "$c/repo" branch --show-current)"
+check "retarget squash: HEAD == origin/main" "$(head_of origin/main)" "$(head_of HEAD)"
+
+# 13) clean on a feature branch with unmerged work: stays put, says why. No gh at all fails closed.
+new_case stay-unmerged; advance_origin 1
+git -C "$c/repo" checkout -q -b feat; commit "$c/repo" feat.txt feat; feat_head=$(head_of HEAD)
+GH=/nonexistent/gh refresh
+check "stay unmerged: still on feat" feat "$(git -C "$c/repo" branch --show-current)"
+check "stay unmerged: HEAD unchanged" "$feat_head" "$(head_of HEAD)"
+has "stay unmerged: reports" "feat has commits not on origin/main - staying" "$out"
+
+# 14) gh knows a merged PR for the branch name, but at a different commit (more work since): stays.
+squash_case stay-newer-commits
+FAKE_GH_OIDS="deadbeef" GH=$fakebin/gh refresh
+check "stay stale PR: still on feat" feat "$(git -C "$c/repo" branch --show-current)"
+
+# 15) landed branch with a dirty tree: never switched.
+new_case stay-dirty; git -C "$c/repo" checkout -q -b feat; echo wip >> "$c/repo/base.txt"; advance_origin 1; refresh
+check "stay dirty: still on feat" feat "$(git -C "$c/repo" branch --show-current)"
+check "stay dirty: edit preserved" "base
+wip" "$(cat "$c/repo/base.txt")"
+
+# 16) landed branch, dry run: not switched.
+new_case retarget-dry; advance_origin 1; git -C "$c/repo" checkout -q -b feat
+DRY_RUN_CMD=echo refresh; unset DRY_RUN_CMD
+check "retarget dry run: still on feat" feat "$(git -C "$c/repo" branch --show-current)"
+
 echo "git-refresh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

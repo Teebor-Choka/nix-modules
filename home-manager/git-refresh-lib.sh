@@ -4,7 +4,7 @@
 # tests/git-refresh-suite.sh. Sourced by the activation script and by the test; function
 # definitions only, no side effects at source time.
 #
-# Honours GIT (git binary, default `git`) and DRY_RUN_CMD (home-manager's dry-run prefix).
+# Honours GIT (git binary, default `git`), GH (gh binary, default `gh`) and DRY_RUN_CMD (home-manager's dry-run prefix).
 
 # _git_refresh_default_branch <target> — print the remote's default branch name, or nothing.
 #   Reads the local origin/HEAD pointer (no network); falls back to origin/main, origin/master.
@@ -20,6 +20,20 @@ _git_refresh_default_branch() {
   return 0
 }
 
+# _git_refresh_landed <target> <default> — succeed when HEAD's work is already on origin/<default>:
+#   HEAD is an ancestor of it (merge or fast-forward), or a merged PR on GitHub had this exact commit
+#   as its head (squash or rebase merge, which leave no ancestry). The PR lookup needs `gh` (GH,
+#   default `gh`) and fails closed: no gh, no auth, or no network means "not landed".
+_git_refresh_landed() {
+  local git=${GIT:-git} gh=${GH:-gh} target=$1 up="refs/remotes/origin/$2" head branch
+  "$git" -C "$target" merge-base --is-ancestor HEAD "$up" 2>/dev/null && return 0
+  command -v "$gh" >/dev/null 2>&1 || return 1
+  head=$("$git" -C "$target" rev-parse HEAD 2>/dev/null) || return 1
+  branch=$("$git" -C "$target" symbolic-ref -q --short HEAD 2>/dev/null) || return 1
+  (cd "$target" && "$gh" pr list --head "$branch" --state merged --json headRefOid --jq '.[].headRefOid' 2>/dev/null) \
+    | grep -qx "$head"
+}
+
 # git_refresh_update <target> <label>
 #   Run AFTER `git fetch origin`. Never discards local work, never merges non-fast-forward, never
 #   rebases.
@@ -27,6 +41,9 @@ _git_refresh_default_branch() {
 #     local default ref via `fetch origin <b>:<b>` (fast-forward-only; the working tree is not
 #     touched). A diverged default is left alone and reported. A local default ahead of origin
 #     (unpushed work) is left alone silently.
+#   - Feature branch checked out, clean tree, and landed on origin/<default> (merged, or its PR
+#     merged at this exact commit; see _git_refresh_landed): check out the default branch. The feature branch ref is kept. A branch
+#     with work not on the default stays checked out, with a one-line note.
 #   - Checked-out branch with a clean tree: fast-forward to its upstream.
 #   - Default branch checked out and dirty: nothing can move; warn with how far behind it is.
 git_refresh_update() {
@@ -49,6 +66,19 @@ git_refresh_update() {
   fi
 
   if [ -z "$("$git" -C "$target" status --porcelain 2>/dev/null)" ]; then
+    if [ -n "$default" ] && [ -n "$current" ] && [ "$current" != "$default" ] \
+      && "$git" -C "$target" show-ref -q --verify "refs/heads/$default"; then
+      if _git_refresh_landed "$target" "$default"; then
+        if ${DRY_RUN_CMD:-} "$git" -C "$target" checkout --quiet "$default" 2>/dev/null; then
+          echo "gitRefresh: $label retargeted $current -> $default ($current already on origin/$default)"
+          before=$("$git" -C "$target" rev-parse --short HEAD 2>/dev/null || true)
+        else
+          echo "gitRefresh: WARNING $label: could not check out $default" >&2
+        fi
+      else
+        echo "gitRefresh: $label: $current has commits not on origin/$default - staying"
+      fi
+    fi
     if ${DRY_RUN_CMD:-} "$git" -C "$target" merge --ff-only --quiet '@{u}' 2>/dev/null; then
       after=$("$git" -C "$target" rev-parse --short HEAD 2>/dev/null || true)
       if [ "$before" = "$after" ]; then
