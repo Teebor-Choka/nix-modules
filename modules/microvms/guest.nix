@@ -3,6 +3,7 @@
 # Receives `vmName` (string) and `vmSpec` (evaluated custom.microvms.<name> attrset)
 # from flake.nix via specialArgs.
 {
+  config,
   pkgs,
   lib,
   inputs,
@@ -361,11 +362,25 @@ in
     };
   };
 
-  systemd.services."home-manager-${vmSpec.user}" = lib.mkIf vmSpec.forwardSshAgent {
-    after = [ "ssh-agent-bridge-ready.service" ];
-    wants = [ "ssh-agent-bridge-ready.service" ];
-    environment.SSH_AUTH_SOCK = "/run/ssh-agent/agent.sock";
-  };
+  # home-manager's unit default is TimeoutStartSec = 5m. A first boot runs every home.gitClone
+  # entry in sequence, each capped at 120s, so the default can stop activation during the clones.
+  # Give the unit the clone worst case on top of the 5m default. mkForce: home-manager sets 5m.
+  systemd.services."home-manager-${vmSpec.user}" = lib.mkMerge [
+    (lib.mkIf vmSpec.forwardSshAgent {
+      after = [ "ssh-agent-bridge-ready.service" ];
+      wants = [ "ssh-agent-bridge-ready.service" ];
+      environment.SSH_AUTH_SOCK = "/run/ssh-agent/agent.sock";
+    })
+    {
+      serviceConfig.TimeoutStartSec =
+        let
+          clones = builtins.length (
+            builtins.attrNames (config.home-manager.users.${vmSpec.user}.home.gitClone or { })
+          );
+        in
+        lib.mkForce "${toString (300 + 120 * clones)}s";
+    }
+  ];
 
   # ── sandy reverse tunnel (vfkit only): dial the shared host tunnel sshd on the vfkit gateway with
   #    the forwarded agent and expose THIS guest's sshd back to the host as 127.0.0.1:<rvport>, so
