@@ -48,39 +48,47 @@ with lib;
   };
 
   config = mkIf (config.home.gitClone != { }) {
-    home.activation.gitClone = hm.dag.entryAfter [ "writeBoundary" ] (
-      ''
-        # BatchMode/ConnectTimeout/ServerAlive so a slow or unreachable SSH endpoint fails fast
-        # instead of hanging activation (and, in a microVM guest, the whole boot) — see the timeout
-        # wrapper below for the agent-hang backstop.
-        export GIT_SSH_COMMAND="${
-          if pkgs.stdenv.isDarwin then "/usr/bin/ssh" else "${pkgs.openssh}/bin/ssh"
-        } -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
-        ${optionalString pkgs.stdenv.isDarwin ''
-          if [ -z "''${SSH_AUTH_SOCK:-}" ]; then
-            SSH_AUTH_SOCK=$(/bin/launchctl asuser "$(id -u)" /bin/launchctl getenv SSH_AUTH_SOCK 2>/dev/null || true)
-            export SSH_AUTH_SOCK
-          fi
-        ''}
-        if [ -z "''${SSH_AUTH_SOCK:-}" ]; then
-          echo "gitClone: WARNING SSH_AUTH_SOCK not set — SSH URL clones will fail."
-        fi
-      ''
-      + concatStringsSep "\n" (
-        mapAttrsToList (relPath: repo: ''
-          target="$HOME/${relPath}"
-          if [ ! -e "$target/.git" ]; then
-            $VERBOSE_ECHO "gitClone: ${repo.url} -> ${relPath}"
-            # Hard wall-clock cap: a hung SSH agent (a not-yet-live forwarded-agent relay) makes
-            # `git clone` block indefinitely with no ssh-level timeout. Bounding it here guarantees
-            # activation — and a microVM boot — can never stall on a clone; it just warns and moves on.
-            $DRY_RUN_CMD ${pkgs.coreutils}/bin/timeout 120 ${pkgs.git}/bin/git clone ${
-              optionalString (repo.depth != null) "--depth ${toString repo.depth} --single-branch"
-            } ${escapeShellArg repo.url} "$target" \
-              || echo "gitClone: WARNING failed to clone ${relPath} (timed out or errored)"
-          fi
-        '') config.home.gitClone
-      )
-    );
+    # After linkGeneration, so the home.file links (.zshrc and similar) are in place before any
+    # clone starts. A slow or failed clone then cannot keep the dotfiles from activation.
+    home.activation.gitClone =
+      hm.dag.entryAfter
+        [
+          "writeBoundary"
+          "linkGeneration"
+        ]
+        (
+          ''
+            # BatchMode/ConnectTimeout/ServerAlive so a slow or unreachable SSH endpoint fails fast
+            # instead of hanging activation (and, in a microVM guest, the whole boot) — see the timeout
+            # wrapper below for the agent-hang backstop.
+            export GIT_SSH_COMMAND="${
+              if pkgs.stdenv.isDarwin then "/usr/bin/ssh" else "${pkgs.openssh}/bin/ssh"
+            } -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
+            ${optionalString pkgs.stdenv.isDarwin ''
+              if [ -z "''${SSH_AUTH_SOCK:-}" ]; then
+                SSH_AUTH_SOCK=$(/bin/launchctl asuser "$(id -u)" /bin/launchctl getenv SSH_AUTH_SOCK 2>/dev/null || true)
+                export SSH_AUTH_SOCK
+              fi
+            ''}
+            if [ -z "''${SSH_AUTH_SOCK:-}" ]; then
+              echo "gitClone: WARNING SSH_AUTH_SOCK not set — SSH URL clones will fail."
+            fi
+          ''
+          + concatStringsSep "\n" (
+            mapAttrsToList (relPath: repo: ''
+              target="$HOME/${relPath}"
+              if [ ! -e "$target/.git" ]; then
+                $VERBOSE_ECHO "gitClone: ${repo.url} -> ${relPath}"
+                # Hard wall-clock cap: a hung SSH agent (a not-yet-live forwarded-agent relay) makes
+                # `git clone` block indefinitely with no ssh-level timeout. Bounding it here guarantees
+                # activation — and a microVM boot — can never stall on a clone; it just warns and moves on.
+                $DRY_RUN_CMD ${pkgs.coreutils}/bin/timeout 120 ${pkgs.git}/bin/git clone ${
+                  optionalString (repo.depth != null) "--depth ${toString repo.depth} --single-branch"
+                } ${escapeShellArg repo.url} "$target" \
+                  || echo "gitClone: WARNING failed to clone ${relPath} (timed out or errored)"
+              fi
+            '') config.home.gitClone
+          )
+        );
   };
 }
