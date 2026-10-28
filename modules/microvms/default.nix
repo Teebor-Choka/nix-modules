@@ -586,6 +586,8 @@ let
           if _in_list secrets $GRANT; then
           ${mkSecretsHook spec}
           else
+            # The guest declares the secrets share regardless; vfkit needs its source dir to exist.
+            install -d -m 700 secrets
             echo "→ secrets withheld from ${name} (not trusted this launch)"
           fi
         '';
