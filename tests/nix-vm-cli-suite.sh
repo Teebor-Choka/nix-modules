@@ -140,5 +140,10 @@ out=$(VM_DEBUG_GRANT=1 "$vm" run smoke true 2>&1); rc=$?
 out=$(VM_DEBUG_GRANT=1 "$vm" up --tun-passthrough smoke 2>&1); rc=$?
 { [ "$rc" = 0 ] && grep -qx 'tun-passthrough: on' <<<"$out"; } && ok "up --tun-passthrough → on" || bad "up tun-passthrough"
 
+# A launch that withholds `secrets` must still create the (empty) share dir: the guest declares the
+# virtiofs share unconditionally, and vfkit dies with "stat secrets: no such file or directory".
+out=$(awk '/^else$/ { e = 1; next } e && /install -d -m 700 secrets/ { ok = 1 } /secrets withheld/ { print ok ? "yes" : "no"; exit }' "$vm"); rc=$?
+{ [ "$rc" = 0 ] && [ "$out" = yes ]; } && ok "withheld secrets → share dir still created" || bad "withheld secrets share dir"
+
 echo "── nix-vm CLI suite: $pass passed, $fail failed ──"
 [ "$fail" = 0 ]
