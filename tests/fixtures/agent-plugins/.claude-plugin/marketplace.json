@@ -19,7 +19,8 @@
       "strict": true,
       "skills": [
         "./multi/a",
-        "./multi/b"
+        "./multi/b",
+        "./multi/odd"
       ],
       "metadata": {
         "version": "1.0.0"

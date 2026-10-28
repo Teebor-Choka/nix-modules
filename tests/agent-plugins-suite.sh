@@ -16,7 +16,8 @@ out=$(nix eval --impure --json --expr "
 get() { jq -c "$1" <<<"$out"; }
 
 check "plugin names, exclude applied" '["solo","multi","bundle"]' "$(get '.names')"
-check "skills-mode skill names" '["a","b"]' "$(get '.byName.multi.skillNames')"
+check "skills-mode skill names, linked by frontmatter name" '["a","b","odd-named"]' "$(get '.byName.multi.skillNames')"
+check "frontmatter-named skill points at its dir" "\"$fix/multi/odd\"" "$(get '.byName.multi.skills["odd-named"]')"
 check "dir-mode skill names from readDir" '["one","two"]' "$(get '.byName.bundle.skillNames')"
 check "dir-mode ignores non-directories" 'false' "$(get '.byName.bundle.skillNames | index("README.md") != null')"
 check "dir-mode root" "\"$fix/bundle\"" "$(get '.byName.bundle.root')"
