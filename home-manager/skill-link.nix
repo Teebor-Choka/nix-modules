@@ -47,13 +47,14 @@ in
         echo "skillLink: ERROR $target is a git checkout — back it up and remove it, then re-run." >&2
         exit 1
       fi
+      excl=${escapeShellArg " ${concatStringsSep " " cfg.exclude} "}
       $DRY_RUN_CMD mkdir -p "$target"
       $DRY_RUN_CMD find "$target" -maxdepth 1 -type l -delete   # prune managed symlinks; real files untouched
       for src in ${concatStringsSep " " (map escapeShellArg cfg.sources)}; do
         [ -d "$src" ] || { echo "skillLink: WARNING missing source $src" >&2; continue; }
         ${pkgs.findutils}/bin/find "$src" -name '.*' -prune -o -type f -name SKILL.md -print | while IFS= read -r f; do
-          dir=$(dirname "$f"); name=$(basename "$dir"); link="$target/$name"
-          case " ${concatStringsSep " " cfg.exclude} " in *" $name "*) continue ;; esac
+          dir=${"$"}{f%/*}; name=${"$"}{dir##*/}; link="$target/$name"
+          case "$excl" in *" $name "*) continue ;; esac
           [ -L "$link" ] && echo "skillLink: WARNING '$name' overridden by $dir" >&2
           $DRY_RUN_CMD ln -sfn "$dir" "$link"
         done

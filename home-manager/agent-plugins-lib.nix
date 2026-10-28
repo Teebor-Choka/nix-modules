@@ -31,7 +31,9 @@ in
           skills =
             if isDir then
               listToAttrs (
-                map (n: nameValuePair n "${root}/skills/${n}") (attrNames (builtins.readDir "${root}/skills"))
+                map (n: nameValuePair n "${root}/skills/${n}") (
+                  attrNames (lib.filterAttrs (_: t: t == "directory") (builtins.readDir "${root}/skills"))
+                )
               )
             else
               listToAttrs (map (s: nameValuePair (baseNameOf (rel s)) (join src s)) (p.skills or [ ]));
@@ -40,6 +42,7 @@ in
           inherit (p) name;
           description = p.description or "";
           version = p.metadata.version or "0.0.0";
+          author = manifest.owner or null;
           inherit root skills;
           skillNames = attrNames skills;
         };

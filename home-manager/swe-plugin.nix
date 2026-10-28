@@ -78,7 +78,7 @@ in
 
     skillsTarget = mkOption {
       type = types.str;
-      default = "${config.home.homeDirectory}/.agents/skills";
+      default = config.home.agentPlugins.skillsTarget;
       description = "Cross-harness skills dir read by oh-my-pi, OpenCode, and Codex.";
     };
 
@@ -126,11 +126,11 @@ in
       );
     }
 
-    # Claude Code: the plugin dir is a launch modifier, not a config file. Add the
-    # interactive shell alias; the given launch command / microVM template uses the
-    # `pluginDir` option (or SWE_PLUGIN_DIR) directly.
+    # Claude Code: the plugin dir is a launch modifier, not a config file. Join the shared
+    # `--plugin-dir` list that home.agentPlugins turns into the alias; the given launch command /
+    # microVM template uses the `pluginDir` option (or SWE_PLUGIN_DIR) directly.
     (mkIf (elem "claude" cfg.agents) {
-      home.shellAliases.claude = "claude --plugin-dir ${pluginDir}";
+      home.agentPlugins.pluginDirs = [ pluginDir ];
     })
 
     # oh-my-pi: link the pre-hook overlay into the agent hooks dir.

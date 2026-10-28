@@ -1,24 +1,27 @@
 #!/usr/bin/env bash
 # Unit test for home-manager/agent-plugins-lib.nix: marketplace.json -> normalized plugin records.
-# Pure `nix eval`, no VM. Run from the repo root: bash tests/agent-plugins-suite.sh
+# One pure `nix eval` (no VM), then jq comparisons. Run from the repo root.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 fix="$PWD/tests/fixtures/agent-plugins"
 fail=0
-check() { # name expected actual
+check() { # label want got
   if [ "$2" = "$3" ]; then echo "ok   $1"; else echo "FAIL $1: expected $2, got $3"; fail=1; fi
 }
-ev() { nix eval --impure --json --expr "
-  let lib = (import <nixpkgs> {}).lib;
-      l = import ./home-manager/agent-plugins-lib.nix { inherit lib; };
-      ps = l.normalize { src = \"$fix\"; exclude = [ \"skipme\" ]; };
-  in $1"; }
 
-check "plugin names, exclude applied" '["solo","multi","bundle"]' "$(ev 'map (p: p.name) ps')"
-check "skills-mode skill names" '["a","b"]' "$(ev '(builtins.head (builtins.filter (p: p.name == "multi") ps)).skillNames')"
-check "dir-mode skill names from readDir" '["one","two"]' "$(ev '(builtins.head (builtins.filter (p: p.name == "bundle") ps)).skillNames')"
-check "dir-mode root" "\"$fix/bundle\"" "$(ev '(builtins.head (builtins.filter (p: p.name == "bundle") ps)).root')"
-check "skills-mode has no root" 'null' "$(ev '(builtins.head (builtins.filter (p: p.name == "solo") ps)).root')"
-check "skill source path" "\"$fix/tools/solo\"" "$(ev '(builtins.head (builtins.filter (p: p.name == "solo") ps)).skills.solo')"
-check "version from metadata" '"1.2.0"' "$(ev '(builtins.head (builtins.filter (p: p.name == "solo") ps)).version')"
+out=$(nix eval --impure --json --expr "
+  let l = import ./home-manager/agent-plugins-lib.nix { lib = import <nixpkgs/lib>; };
+      ps = l.normalize { src = \"$fix\"; exclude = [ \"skipme\" ]; };
+  in { names = map (p: p.name) ps; byName = builtins.listToAttrs (map (p: { name = p.name; value = p; }) ps); }")
+get() { jq -c "$1" <<<"$out"; }
+
+check "plugin names, exclude applied" '["solo","multi","bundle"]' "$(get '.names')"
+check "skills-mode skill names" '["a","b"]' "$(get '.byName.multi.skillNames')"
+check "dir-mode skill names from readDir" '["one","two"]' "$(get '.byName.bundle.skillNames')"
+check "dir-mode ignores non-directories" 'false' "$(get '.byName.bundle.skillNames | index("README.md") != null')"
+check "dir-mode root" "\"$fix/bundle\"" "$(get '.byName.bundle.root')"
+check "skills-mode has no root" 'null' "$(get '.byName.solo.root')"
+check "skill source path" "\"$fix/tools/solo\"" "$(get '.byName.solo.skills.solo')"
+check "version from metadata" '"1.2.0"' "$(get '.byName.solo.version')"
+check "author from marketplace owner" '{"name":"Fixture Owner"}' "$(get '.byName.solo.author')"
 exit $fail

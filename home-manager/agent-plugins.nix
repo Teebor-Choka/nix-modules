@@ -17,7 +17,7 @@ let
     mkEnableOption
     types
     mkIf
-    mkForce
+    mkMerge
     concatMap
     concatStringsSep
     mapAttrsToList
@@ -39,13 +39,18 @@ let
       pkgs.runCommand "plugin-${p.name}" { } ''
         mkdir -p $out/.claude-plugin $out/skills
         cp ${
-          pkgs.writeText "plugin.json" (builtins.toJSON { inherit (p) name version description; })
+          pkgs.writeText "plugin.json" (
+            builtins.toJSON (
+              {
+                inherit (p) name version description;
+              }
+              // lib.optionalAttrs (p.author != null) { inherit (p) author; }
+            )
+          )
         } $out/.claude-plugin/plugin.json
         ${concatStringsSep "\n" (mapAttrsToList (n: path: "ln -s ${path} $out/skills/${n}") p.skills)}
       '';
 
-  closures = map closure plugins;
-  pluginDirs = map toString closures ++ cfg.extraPluginDirs;
   skillsRel = removePrefix "${config.home.homeDirectory}/" cfg.skillsTarget;
 in
 {
@@ -71,12 +76,6 @@ in
       default = [ ];
     };
 
-    extraPluginDirs = mkOption {
-      type = types.listOf types.str;
-      default = [ ];
-      description = "Further `--plugin-dir` values, for plugins wired by their own module.";
-    };
-
     skillsTarget = mkOption {
       type = types.str;
       default = "${config.home.homeDirectory}/.agents/skills";
@@ -92,22 +91,28 @@ in
 
     pluginDirs = mkOption {
       type = types.listOf types.str;
-      readOnly = true;
-      default = pluginDirs;
-      description = "Read-only: the closures given to Claude Code via `--plugin-dir`.";
+      default = [ ];
+      description = ''
+        Every `--plugin-dir` Claude Code is launched with. Lists merge, so a module that wires
+        its own plugin (home.swePlugin) appends its dir here; this module owns the alias.
+      '';
     };
   };
 
-  config = mkIf cfg.enable {
-    # mkForce: this alias also carries home.swePlugin's dir (via extraPluginDirs), so it wins.
-    home.shellAliases.claude = mkForce (
-      "claude " + concatStringsSep " " (map (d: "--plugin-dir ${d}") pluginDirs)
-    );
+  config = mkMerge [
+    (mkIf (cfg.pluginDirs != [ ]) {
+      home.shellAliases.claude =
+        "claude " + concatStringsSep " " (map (d: "--plugin-dir ${d}") cfg.pluginDirs);
+    })
 
-    home.file = listToAttrs (
-      concatMap (
-        p: mapAttrsToList (n: path: nameValuePair "${skillsRel}/${n}" { source = path; }) p.skills
-      ) plugins
-    );
-  };
+    (mkIf cfg.enable {
+      home.agentPlugins.pluginDirs = map (p: toString (closure p)) plugins;
+
+      home.file = listToAttrs (
+        concatMap (
+          p: mapAttrsToList (n: path: nameValuePair "${skillsRel}/${n}" { source = path; }) p.skills
+        ) plugins
+      );
+    })
+  ];
 }
