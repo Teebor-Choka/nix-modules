@@ -83,5 +83,21 @@ run_case ./r6 'echo should-not-run'
   && ok "fatal boot detected + reported, no hang" \
   || bad "fatal boot handling (rc=$RC, err=$(tr '\n' '|' <<<"$ERR"))"
 
+# ── Case 7: a guest shell that blocks on a cursor-position query (ESC[6n) gets an answer ─
+#   The agent guest's login shell probes the serial console size with ESC[6n and waits for the
+#   reply; an unanswered probe swallowed the injected command, so `vm run` printed nothing and
+#   exited 1. The runner reads the reply (up to `R`) before it reads any command line.
+{
+  echo "#!$BASH_BIN"
+  echo 'echo "Reached target Multi-User"'
+  printf '%s\n' "printf '\\033[6n'"
+  echo 'IFS= read -r -s -d R -t 10 reply || exit 9'
+  echo 'while IFS= read -r line; do eval "$line" || true; done'
+} > r7; chmod +x r7
+run_case ./r7 'echo dsr-ok'
+{ [ "$RC" = 0 ] && grep -q 'dsr-ok' <<<"$OUT"; } \
+  && ok "cursor-position query answered, command ran" \
+  || bad "cursor-position query (rc=$RC, out=$(tr '\n' '|' <<<"$OUT"))"
+
 echo "── console-run suite: $pass passed, $fail failed ──"
 [ "$fail" = 0 ]

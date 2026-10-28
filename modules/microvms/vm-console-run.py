@@ -32,6 +32,7 @@ import termios
 import time
 import pty
 
+CURSOR_QUERY = b"\x1b[6n"
 BOOT_TIMEOUT = 360   # seconds to wait for multi-user.target
 RUN_TIMEOUT  = 3600  # seconds budget for the command itself
 
@@ -118,6 +119,10 @@ def main() -> None:
                 if not chunk:
                     break
                 buf.extend(chunk)
+                # A guest shell may probe the console size with a cursor-position query (ESC[6n)
+                # and block until it gets a reply, swallowing the injected command. Answer it.
+                if CURSOR_QUERY in chunk:
+                    _write("\x1b[24;80R")
             elif not _child_alive():
                 break
 
@@ -136,12 +141,16 @@ def main() -> None:
                     time.sleep(1.0)   # give the VM's tty driver time to process stty
                     # Step 2: disable host PTY slave echo so our command text does not
                     # appear in the master's output stream (prevents sentinel false-match)
-                    try:
-                        attrs = termios.tcgetattr(master_fd)
-                        attrs[3] &= ~termios.ECHO
-                        termios.tcsetattr(master_fd, termios.TCSANOW, attrs)
-                    except termios.error:
-                        pass
+                    # Skipped on macOS: there, clearing ECHO on the master stalls the slave's
+                    # input and the injected command never runs. The base64 wrapping already keeps
+                    # the sentinels out of any echo, so nothing depends on this step.
+                    if sys.platform != "darwin":
+                        try:
+                            attrs = termios.tcgetattr(master_fd)
+                            attrs[3] &= ~termios.ECHO
+                            termios.tcsetattr(master_fd, termios.TCSANOW, attrs)
+                        except termios.error:
+                            pass
                     buf.clear()
                     # Step 3: send the command. The whole sentinel-wrapped script is base64-encoded
                     # so the line we type contains NO sentinel literals — base64's alphabet has no
