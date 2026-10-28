@@ -54,7 +54,7 @@ in
         {
           inherit (p) name;
           description = p.description or "";
-          version = p.metadata.version or "0.0.0";
+          version = p.metadata.version or null;
           author = manifest.owner or null;
           inherit root skills;
           skillNames = attrNames skills;

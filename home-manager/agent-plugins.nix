@@ -42,8 +42,9 @@ let
           pkgs.writeText "plugin.json" (
             builtins.toJSON (
               {
-                inherit (p) name version description;
+                inherit (p) name description;
               }
+              // lib.optionalAttrs (p.version != null) { inherit (p) version; }
               // lib.optionalAttrs (p.author != null) { inherit (p) author; }
             )
           )

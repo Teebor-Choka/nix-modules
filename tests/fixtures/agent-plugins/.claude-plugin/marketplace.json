@@ -45,6 +45,14 @@
       "metadata": {
         "version": "0.1.0"
       }
+    },
+    {
+      "name": "unversioned",
+      "description": "no metadata.version",
+      "source": "./",
+      "skills": [
+        "./multi/a"
+      ]
     }
   ],
   "owner": {
