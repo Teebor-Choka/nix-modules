@@ -33,6 +33,11 @@ in
       default = [ ];
       description = "Absolute dirs scanned recursively for SKILL.md (later source wins on name clash).";
     };
+    exclude = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      description = "Skill names to skip, because another path delivers them (for example a plugin).";
+    };
   };
 
   config = mkIf cfg.enable {
@@ -48,6 +53,7 @@ in
         [ -d "$src" ] || { echo "skillLink: WARNING missing source $src" >&2; continue; }
         ${pkgs.findutils}/bin/find "$src" -name '.*' -prune -o -type f -name SKILL.md -print | while IFS= read -r f; do
           dir=$(dirname "$f"); name=$(basename "$dir"); link="$target/$name"
+          case " ${concatStringsSep " " cfg.exclude} " in *" $name "*) continue ;; esac
           [ -L "$link" ] && echo "skillLink: WARNING '$name' overridden by $dir" >&2
           $DRY_RUN_CMD ln -sfn "$dir" "$link"
         done
