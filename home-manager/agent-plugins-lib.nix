@@ -14,6 +14,19 @@ let
     ;
   rel = p: removeSuffix "/" (removePrefix "./" p);
   join = src: p: if rel p == "" then src else "${src}/${rel p}";
+  # The name an agent knows a skill by is its frontmatter `name`, and Codex/OpenCode require the
+  # directory they scan to carry it. Fall back to the dir name when the file has none.
+  skillName =
+    path:
+    let
+      line = lib.findFirst (l: lib.hasPrefix "name:" l) null (
+        lib.splitString "\n" (builtins.readFile "${path}/SKILL.md")
+      );
+    in
+    if line == null then
+      baseNameOf path
+    else
+      lib.removeSuffix "\"" (lib.removePrefix "\"" (lib.trim (lib.removePrefix "name:" line)));
 in
 {
   normalize =
@@ -36,7 +49,7 @@ in
                 )
               )
             else
-              listToAttrs (map (s: nameValuePair (baseNameOf (rel s)) (join src s)) (p.skills or [ ]));
+              listToAttrs (map (s: nameValuePair (skillName (join src s)) (join src s)) (p.skills or [ ]));
         in
         {
           inherit (p) name;
