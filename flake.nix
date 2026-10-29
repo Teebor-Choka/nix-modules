@@ -4,7 +4,7 @@
   # These inputs are TEST-ONLY: used solely by `checks` to instantiate a sample microVM guest so
   # `nix flake check` validates the modules standalone. Consumers still declare their OWN inputs and
   # pass them to these modules via `specialArgs = { inherit inputs; }` — they do not depend on these.
-  # (Consumers should add `nix-modules.inputs.<name>.follows = "<name>"` to dedupe their lock.)
+  # (Consumers should add `nix-vm.inputs.<name>.follows = "<name>"` to dedupe their lock.)
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
     home-manager.url = "github:nix-community/home-manager/release-26.05";
@@ -51,7 +51,7 @@
       # Turns a consumer's host registry into the microVM flake outputs it would otherwise
       # hand-roll: per-VM guest configs, `nix run`-able runner packages, and eval/helper
       # checks. The consumer passes its OWN inputs (must provide nixpkgs + microvm); the
-      # nix-modules guest/builder modules are closed over from this flake.
+      # nix-vm guest/builder modules are closed over from this flake.
       #
       #   hosts      : the raw host registry ({ <name> = { system; class; …; }; })
       #   builtHosts : the evaluated systems (darwinSystem / nixosSystem) keyed by the same names
