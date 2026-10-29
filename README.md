@@ -1,4 +1,4 @@
-# nix-modules
+# nix-vm
 
 Reusable nix-darwin + NixOS + home-manager modules.
 
@@ -46,15 +46,15 @@ inputs = {
   microvm.inputs.nixpkgs.follows = "nixpkgs";
 
   # This repo — declares its own (test-only) inputs; point them at yours to dedupe the lock.
-  nix-modules.url    = "github:Teebor-Choka/nix-modules";
-  nix-modules.inputs.nixpkgs.follows          = "nixpkgs";
-  nix-modules.inputs.home-manager.follows     = "home-manager";
-  nix-modules.inputs.microvm.follows          = "microvm";
-  nix-modules.inputs.nixneovimplugins.follows = "nixneovimplugins";
+  nix-vm.url    = "github:Teebor-Choka/nix-vm";
+  nix-vm.inputs.nixpkgs.follows          = "nixpkgs";
+  nix-vm.inputs.home-manager.follows     = "home-manager";
+  nix-vm.inputs.microvm.follows          = "microvm";
+  nix-vm.inputs.nixneovimplugins.follows = "nixneovimplugins";
 };
 ```
 
-> `nix-modules`' inputs are **test-only** (used solely by its own `nix flake check`); the modules
+> `nix-vm`' inputs are **test-only** (used solely by its own `nix flake check`); the modules
 > receive the consuming flake's inputs via `specialArgs.inputs` and don't depend on them. The
 > `follows` lines above keep the lock deduped to one `nixpkgs` — recommended, not required.
 
@@ -70,11 +70,11 @@ nix-darwin.lib.darwinSystem {
   system = "aarch64-darwin";
   specialArgs = { inherit inputs; hostname = "my-mac"; };
   modules = [
-    inputs.nix-modules.nixosModules.options
-    inputs.nix-modules.nixosModules.nativeNix
-    inputs.nix-modules.nixosModules.shared
-    inputs.nix-modules.nixosModules.microvms
-    inputs.nix-modules.darwinModules.default
+    inputs.nix-vm.nixosModules.options
+    inputs.nix-vm.nixosModules.nativeNix
+    inputs.nix-vm.nixosModules.shared
+    inputs.nix-vm.nixosModules.microvms
+    inputs.nix-vm.darwinModules.default
     nix-homebrew.darwinModules.nix-homebrew
     home-manager.darwinModules.home-manager
     ./users/<username>              # sets custom.username, homebrew lists, wires home-manager
@@ -88,12 +88,12 @@ nixpkgs.lib.nixosSystem {
   system = "x86_64-linux";
   specialArgs = { inherit inputs; hostname = "my-workstation"; };
   modules = [
-    inputs.nix-modules.nixosModules.options
-    inputs.nix-modules.nixosModules.nativeNix
-    inputs.nix-modules.nixosModules.shared
-    inputs.nix-modules.nixosModules.microvms
-    inputs.nix-modules.nixosModules.core
-    inputs.nix-modules.nixosModules.gnome
+    inputs.nix-vm.nixosModules.options
+    inputs.nix-vm.nixosModules.nativeNix
+    inputs.nix-vm.nixosModules.shared
+    inputs.nix-vm.nixosModules.microvms
+    inputs.nix-vm.nixosModules.core
+    inputs.nix-vm.nixosModules.gnome
     home-manager.nixosModules.home-manager
     ./hosts/my-workstation/hardware-configuration.nix
     ./users/<username>
@@ -135,7 +135,7 @@ registry, and the evaluated systems:
 
 ```nix
 # flake.nix (private host repo), in the outputs let-block
-fleet = inputs.nix-modules.lib.mkMicrovmFleet {
+fleet = inputs.nix-vm.lib.mkMicrovmFleet {
   inherit inputs;
   hosts      = hosts;        # { <name> = { system; class; … }; }  (your raw registry)
   builtHosts = builtHosts;   # mapAttrs mkHost hosts  (the evaluated darwin/nixos systems)
@@ -214,7 +214,7 @@ home-manager/
 Pin is managed by `flake.lock` in the consuming repo:
 
 ```bash
-nix flake update nix-modules   # bump to latest commit on main
+nix flake update nix-vm   # bump to latest commit on main
 nix flake update               # bump all inputs
 ```
 
@@ -226,7 +226,7 @@ To iterate on these modules without pushing:
 # In your private repo:
 nix eval .#darwinConfigurations.<host>.config.system.build.toplevel \
   --apply lib.isDerivation \
-  --override-input nix-modules path:../nix-modules
+  --override-input nix-vm path:../nix-vm
 ```
 
 ---

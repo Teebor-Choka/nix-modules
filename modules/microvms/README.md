@@ -30,7 +30,7 @@ These modules are input-free; the consuming flake passes its own inputs via `spe
   nixpkgs.lib.nixosSystem {
     system = "<guest-linux-system>";
     specialArgs = { inherit inputs; vmName = "<name>"; vmSpec = <evaluated custom.microvms.<name>>; };
-    modules = [ inputs.microvm.nixosModules.microvm nix-modules.nixosModules.microvmGuest ] ++ vmSpec.extraModules;
+    modules = [ inputs.microvm.nixosModules.microvm nix-vm.nixosModules.microvmGuest ] ++ vmSpec.extraModules;
   };
   ```
   `inputs` must provide **`nixpkgs`**, **`home-manager`**, and **`microvm`**.
@@ -221,7 +221,7 @@ checks (dotfiles, private repos, per-tool CLIs) in a thin wrapper in your own fl
 
 ```bash
 VM=claude EXPECT_USER=alice GIT_REMOTE=git@github.com:me/repo.git \
-  bash "${nix-modules}/tests/vm-smoke-suite.sh" all
+  bash "${nix-vm}/tests/vm-smoke-suite.sh" all
 ```
 
 | Env | Required | Meaning |
