@@ -1,4 +1,0 @@
----
-name: one
-description: fixture
----
