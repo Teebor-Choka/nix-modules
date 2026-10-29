@@ -513,34 +513,6 @@
             ''
           );
 
-          # Unit test for the agent-plugins marketplace normalizer: evaluated here (the sandbox has no
-          # nix), then compared by the suite's jq checks. See tests/agent-plugins-suite.sh.
-          agent-plugins-lib =
-            let
-              fix = "${./tests/fixtures/agent-plugins}";
-              ps = (import ./home-manager/agent-plugins-lib.nix { inherit lib; }).normalize {
-                src = fix;
-                exclude = [ "skipme" ];
-              };
-              records = pkgs.writeText "agent-plugins.json" (
-                builtins.toJSON {
-                  names = map (p: p.name) ps;
-                  byName = lib.listToAttrs (map (p: lib.nameValuePair p.name p) ps);
-                }
-              );
-            in
-            pkgs.runCommand "agent-plugins-lib"
-              {
-                nativeBuildInputs = [
-                  pkgs.bash
-                  pkgs.jq
-                ];
-              }
-              ''
-                bash ${./tests/agent-plugins-suite.sh} ${records} ${fix}
-                touch "$out"
-              '';
-
           # The live smoke suite can't run in the sandbox (needs a real hypervisor + network),
           # so it isn't a runnable check — but syntax-check it so a broken edit fails CI.
           vm-smoke-syntax = pkgs.runCommand "vm-smoke-syntax" { nativeBuildInputs = [ pkgs.bash ]; } ''

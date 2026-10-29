@@ -3,9 +3,6 @@
   imports = [
     ./git-clone.nix
     ./git-refresh.nix # opt-in: home.gitRefresh.enable — keep gitClone checkouts current
-    ./skill-link.nix # opt-in: home.skillLink — flatten SKILL.md dirs into ~/.claude/skills
-    ./swe-plugin.nix # opt-in: home.swePlugin — wire the swe-process policy-gate plugin per harness
-    ./agent-plugins.nix # opt-in: home.agentPlugins — deliver marketplace plugins to every harness
   ];
 
   home.stateVersion = "24.05";

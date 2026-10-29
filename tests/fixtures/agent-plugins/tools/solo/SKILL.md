@@ -1,4 +1,0 @@
----
-name: solo
-description: fixture
----
