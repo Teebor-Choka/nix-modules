@@ -47,7 +47,13 @@ vm down   <name>                 # tear down agent bridge (poweroff inside the V
 vm list                          # show defined VMs
 vm build  <name>                 # pre-build the guest image
 vm doctor [name…]                # verify / self-heal the SSH-agent bridge of running VM(s)
+vm doctor --secrets [opts] <name>   # boot, then print NAME + length of each expected secret env var (never the value)
 ```
+
+`vm run` streams the raw guest console to `~/.local/state/microvm/logs/<name>-<time>-<pid>.log` (path printed at
+start; mode 0600; files older than 14 days are pruned), prints a `[vm-run] heartbeat` line every 30 s
+(`VM_HEARTBEAT`), and ends with `[vm-run] exit=N elapsed=Ns`. The timeout covers boot plus the command, not the
+`nix build` that precedes the boot.
 
 `vm up` runs in the foreground (serial console). Type `poweroff` inside to stop; ephemeral state is
 wiped on exit. Run `vm up <name>` in several terminals for concurrent instances.
@@ -79,6 +85,7 @@ Pass one-off inputs at launch without editing the flake — the e2b-style "creat
 this env and this directory, run" flow:
 
 ```bash
+vm run --timeout 300 <name> <cmd…>            # kill the VM and exit 124 after 300 s (default 600; or $NIX_VM_TIMEOUT)
 vm run --env KEY=VALUE <name> <cmd…>          # export KEY for the command (repeatable; run only)
 vm run --mount ./project <name> 'cd /mnt/host && …'   # share a host dir at launchMountPoint (RW, this launch)
 vm run --cpu 4 --mem 2048 <name> <cmd…>       # override vCPU / memory (MiB) for this launch

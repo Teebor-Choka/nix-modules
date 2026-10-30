@@ -6,7 +6,14 @@ Usage: vm-console-run.py <runner> <b64cmd>
   b64cmd  – base64-encoded (single line, no whitespace) shell command to run in the VM;
             stdout+stderr merged, streamed live to our stdout
 
-Exit code: the exit code of the command run in the VM, or non-zero on failure.
+Environment (all optional):
+  VM_RUN_TIMEOUT    wall-clock budget in seconds for boot + command (default 600). On expiry the
+                    VM is killed and the driver exits 124.
+  VM_CONSOLE_LOG    file that receives every raw console byte as it arrives (mode 0600), so a
+                    stuck boot or command stays visible. The path is printed at start.
+  VM_HEARTBEAT      seconds between "[vm-run] heartbeat" lines on stderr (default 30; 0 = off).
+
+Exit code: the exit code of the command run in the VM, 124 on timeout, or other non-zero on failure.
 
 Design notes:
   - pty.fork() puts the runner on the PTY slave so vfkit's virtio-serial,stdio sees a TTY.
@@ -34,7 +41,9 @@ import pty
 
 CURSOR_QUERY = b"\x1b[6n"
 BOOT_TIMEOUT = 360   # seconds to wait for multi-user.target
-RUN_TIMEOUT  = 3600  # seconds budget for the command itself
+RUN_TIMEOUT  = 600   # default wall-clock budget (boot + command); override with VM_RUN_TIMEOUT
+HEARTBEAT    = 30    # default seconds between heartbeat lines; override with VM_HEARTBEAT
+EXIT_TIMEOUT = 124   # same code as timeout(1)
 
 READY_RE = re.compile(
     rb'Reached target .*[Mm]ulti-[Uu]ser|login:\s*$', re.MULTILINE)
@@ -42,6 +51,19 @@ FATAL_RE = re.compile(
     rb'Kernel panic|Emergency Mode|Dependency failed for|'
     rb'cannot build|build of .* failed|operation not supported by device',
     re.IGNORECASE)
+
+
+def _env_num(name: str, default: int) -> int:
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default
+    try:
+        val = int(raw)
+    except ValueError:
+        sys.exit(f"[vm-run] {name} must be a non-negative integer, got '{raw}'")
+    if val < 0:
+        sys.exit(f"[vm-run] {name} must be a non-negative integer, got '{raw}'")
+    return val
 
 
 def main() -> None:
@@ -53,6 +75,25 @@ def main() -> None:
     nonce     = secrets.token_hex(8)
     begin_tag = f"__VMR_B_{nonce}__"
     end_tag   = f"__VMR_E_{nonce}__"
+
+    run_timeout = _env_num("VM_RUN_TIMEOUT", RUN_TIMEOUT)
+    if run_timeout == 0:
+        sys.exit("[vm-run] VM_RUN_TIMEOUT must be > 0")
+    heartbeat = _env_num("VM_HEARTBEAT", HEARTBEAT)
+    start = time.monotonic()
+    hard_deadline = start + run_timeout
+    log_path = os.environ.get("VM_CONSOLE_LOG", "")
+    log_fd = -1
+    if log_path:
+        try:
+            log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        except OSError as e:
+            print(f"[vm-run] cannot open console log {log_path}: {e}", file=sys.stderr)
+            log_path = ""
+    print(
+        f"[vm-run] timeout {run_timeout}s; console log: {log_path or '<none>'}",
+        file=sys.stderr, flush=True,
+    )
 
     child_pid, master_fd = pty.fork()
     if child_pid == 0:
@@ -92,19 +133,34 @@ def main() -> None:
 
     buf       = bytearray()
     phase     = "boot"
-    deadline  = time.monotonic() + BOOT_TIMEOUT
+    deadline  = min(start + BOOT_TIMEOUT, hard_deadline)
     exit_code = 1
+    timed_out = False
+    total_bytes = 0
+    next_beat = start + heartbeat if heartbeat else float("inf")
 
     try:
         while True:
             if phase == "done":
                 break
-            if time.monotonic() > deadline:
+            now = time.monotonic()
+            if now > deadline:
+                timed_out = True
+                exit_code = EXIT_TIMEOUT
                 print(
-                    f"\n[vm-run] timed out in phase '{phase}'",
+                    f"\n[vm-run] TIMEOUT after {int(now - start)}s in phase '{phase}'"
+                    f" (budget {run_timeout}s); killing the VM."
+                    + (f" Console log: {log_path}" if log_path else ""),
                     file=sys.stderr,
                 )
                 break
+            if now >= next_beat:
+                print(
+                    f"[vm-run] heartbeat: phase={phase} elapsed={int(now - start)}s"
+                    f" console_bytes={total_bytes}",
+                    file=sys.stderr, flush=True,
+                )
+                next_beat = now + heartbeat
 
             try:
                 r, _, _ = select.select([master_fd], [], [], 0.5)
@@ -119,6 +175,12 @@ def main() -> None:
                 if not chunk:
                     break
                 buf.extend(chunk)
+                total_bytes += len(chunk)
+                if log_fd >= 0:
+                    try:
+                        os.write(log_fd, chunk)
+                    except OSError:
+                        pass
                 # A guest shell may probe the console size with a cursor-position query (ESC[6n)
                 # and block until it gets a reply, swallowing the injected command. Answer it.
                 if CURSOR_QUERY in chunk:
@@ -166,7 +228,7 @@ def main() -> None:
                     _write(f"printf '%s' '{blob}' | base64 -d | bash\n")
                     print("[vm-run] boot ready → command injected", file=sys.stderr)
                     phase    = "inject"
-                    deadline = time.monotonic() + RUN_TIMEOUT
+                    deadline = hard_deadline
 
             # ── inject: wait for the begin sentinel ──────────────────────────
             elif phase == "inject":
@@ -206,11 +268,19 @@ def main() -> None:
 
     finally:
         _kill_child()
+        if log_fd >= 0:
+            os.close(log_fd)
         try:
             os.close(master_fd)
         except OSError:
             pass
 
+    print(
+        f"[vm-run] exit={exit_code} elapsed={int(time.monotonic() - start)}s"
+        + (" (timeout)" if timed_out else "")
+        + (f" log={log_path}" if log_path else ""),
+        file=sys.stderr,
+    )
     sys.exit(exit_code)
 
 

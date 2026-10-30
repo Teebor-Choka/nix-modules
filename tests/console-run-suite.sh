@@ -99,5 +99,34 @@ run_case ./r7 'echo dsr-ok'
   && ok "cursor-position query answered, command ran" \
   || bad "cursor-position query (rc=$RC, out=$(tr '\n' '|' <<<"$OUT"))"
 
+# ── Case 8: a hung guest hits VM_RUN_TIMEOUT: killed, exit 124, clear message, heartbeat, log ─
+#   The runner boots, then never reads the injected command (stuck guest). Without a timeout the
+#   driver used to wait up to an hour with no output.
+{
+  echo "#!$BASH_BIN"
+  echo 'echo "Reached target Multi-User"'
+  echo 'exec sleep 60'
+} > r8; chmod +x r8
+start=$SECONDS
+VM_RUN_TIMEOUT=4 VM_HEARTBEAT=1 VM_CONSOLE_LOG="$work/c8.log" run_case ./r8 'echo never'
+{ [ "$RC" = 124 ] && [ $((SECONDS - start)) -lt 30 ] && grep -q 'TIMEOUT after' <<<"$ERR" \
+  && grep -q '\[vm-run\] heartbeat' <<<"$ERR" && grep -q "console log: $work/c8.log" <<<"$ERR" \
+  && grep -q 'Multi-User' "$work/c8.log"; } \
+  && ok "hung guest: timeout kills VM, exit 124, heartbeat + console log" \
+  || bad "timeout handling (rc=$RC, err=$(tr '\n' '|' <<<"$ERR"))"
+
+# ── Case 9: happy path streams the console to the log and prints a final exit line ───
+make_runner r9 "Reached target Multi-User" 0 0
+VM_CONSOLE_LOG="$work/c9.log" run_case ./r9 'echo logged-line; exit 5'
+{ [ "$RC" = 5 ] && grep -q 'logged-line' "$work/c9.log" && grep -q '\[vm-run\] exit=5' <<<"$ERR"; } \
+  && ok "console streamed to log; final exit line printed" \
+  || bad "console log / exit line (rc=$RC, err=$(tr '\n' '|' <<<"$ERR"))"
+
+# ── Case 10: invalid VM_RUN_TIMEOUT is rejected before any VM starts ─────────────────
+make_runner r10 "Reached target Multi-User" 0 0
+VM_RUN_TIMEOUT=abc run_case ./r10 'echo x'
+{ [ "$RC" != 0 ] && grep -q 'VM_RUN_TIMEOUT must be' <<<"$ERR"; } \
+  && ok "invalid VM_RUN_TIMEOUT rejected" || bad "invalid timeout (rc=$RC)"
+
 echo "── console-run suite: $pass passed, $fail failed ──"
 [ "$fail" = 0 ]
