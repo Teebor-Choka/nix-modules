@@ -44,6 +44,15 @@ let
     spec: ''"${if spec.defaultMount == null then "" else spec.defaultMount}"''
   );
 
+  # Per-VM env var names its declared secrets expose in the guest (name → space list; names only,
+  # never values). Feeds `vm doctor --secrets`.
+  vmSecretEnvsStr = bakeMap (
+    spec:
+    ''"${
+      concatStringsSep " " (filter (n: n != null) (map (sec: sec.target.envName) spec.secrets))
+    }"''
+  );
+
   # Platform-derived home directory prefix for option defaults
   homePrefix = if pkgs.stdenv.isDarwin then "/Users" else "/home";
 
@@ -713,6 +722,9 @@ in
           # Per-VM default trust grant (name → csv of tokens; empty = grant nothing at launch)
           declare -A VM_TRUST_DEFAULT=(${vmTrustDefaultStr})
 
+          # Per-VM env var names the declared secrets expose in the guest (names only, no values)
+          declare -A VM_SECRET_ENVS=(${vmSecretEnvsStr})
+
           # Per-VM launch-mount slot presence (1 = built with the mount share; enables --mount/defaultMount)
           declare -A VM_LAUNCH_MOUNT=(${vmLaunchMountStr})
 
@@ -728,7 +740,8 @@ in
           #   CPU/MEM_OVERRIDE  --cpu/--mem for this launch; empty = keep the VM's built-in vcpu/mem
           #   mode/csv     trust flag mode + explicit --trust csv;  env_prefix  --env exports (run)
           GRANT=""; MOUNT_SRC=""; CPU_OVERRIDE=""; MEM_OVERRIDE=""; TUN_PASSTHROUGH=0
-          mode=default; csv=""; env_prefix=""
+          #   TIMEOUT_OVERRIDE  --timeout seconds (run/doctor --secrets); empty = $NIX_VM_TIMEOUT or 600
+          mode=default; csv=""; env_prefix=""; TIMEOUT_OVERRIDE=""
 
           # Path to the standalone Tailscale CLI (macsys cask). Only used by --tun-passthrough (Darwin).
           SANDY_TS="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
@@ -800,6 +813,7 @@ in
             echo "mount: ''${MOUNT_SRC:-<none>}"
             echo "cpu: ''${CPU_OVERRIDE:-<default>}"
             echo "mem: ''${MEM_OVERRIDE:-<default>}"
+            echo "timeout: ''${TIMEOUT_OVERRIDE:-<default>}"
             echo "tun-passthrough: $([ "$TUN_PASSTHROUGH" = 1 ] && echo on || echo off)"
           }
 
@@ -808,7 +822,7 @@ in
           # command) in PARSE_REST. $1 = context ("up" rejects --env; "run" accepts it). rc 2 on error.
           _parse_launch_opts() {
             local ctx=$1; shift
-            mode=default; csv=""; MOUNT_SRC=""; CPU_OVERRIDE=""; MEM_OVERRIDE=""; env_prefix=""; TUN_PASSTHROUGH=0
+            mode=default; csv=""; MOUNT_SRC=""; CPU_OVERRIDE=""; MEM_OVERRIDE=""; env_prefix=""; TUN_PASSTHROUGH=0; TIMEOUT_OVERRIDE=""
             while [ $# -gt 0 ]; do
               case "$1" in
                 --trusted)  mode=trusted;  shift ;;
@@ -822,6 +836,12 @@ in
                 --mem)      MEM_OVERRIDE=$(_pos_int --mem "''${2:?'--mem needs a positive integer (MiB)'}") || return 2; shift 2 ;;
                 --mem=*)    MEM_OVERRIDE=$(_pos_int --mem "''${1#--mem=}") || return 2; shift ;;
                 --tun-passthrough) TUN_PASSTHROUGH=1; shift ;;
+                --timeout | --timeout=*)
+                  [ "$ctx" = run ] || { echo "✗ --timeout is supported only on 'vm run' (vm up is an interactive login)" >&2; return 2; }
+                  case "$1" in
+                    --timeout=*) TIMEOUT_OVERRIDE=$(_pos_int --timeout "''${1#--timeout=}") || return 2; shift ;;
+                    *)           TIMEOUT_OVERRIDE=$(_pos_int --timeout "''${2:?'--timeout needs seconds'}") || return 2; shift 2 ;;
+                  esac ;;
                 --env | --env=*)
                   [ "$ctx" = run ] || { echo "✗ --env is supported only on 'vm run' (vm up is an interactive login)" >&2; return 2; }
                   case "$1" in
@@ -872,6 +892,7 @@ in
             --mount <hostdir>     Share <hostdir> into the guest for this launch (RW; overrides defaultMount)
             --cpu N               Override the guest vCPU count for this launch
             --mem MiB             Override the guest memory (MiB) for this launch
+            --timeout SECS        Kill the VM and exit 124 after SECS (run only; default 600, or $NIX_VM_TIMEOUT)
             --tun-passthrough     Route the guest into the host's current Tailscale mesh (vfkit only):
                                   reach tailnet servers via the host's authenticated tunnel
             test  <name> [secs]   Headless smoke-test: boot to multi-user then tear down (exit 0=pass)
@@ -879,6 +900,9 @@ in
             list                  Show defined VMs, bridge status, and running sandboxes (with ids)
             doctor [--watch [s]] [name…]
                                   Verify + self-heal the SSH-agent bridge of running VM(s)
+            doctor --secrets [opts] <name>
+                                  Boot <name> headlessly and check each expected secret env var is
+                                  set in the guest (prints NAME and length only; exit 1 if any missing)
             builder <cmd>         Manage the vfkit linux-builder (macOS): up|down|status|logs
           EOF
             echo ""
@@ -1224,7 +1248,40 @@ in
             b64cmd=$(printf '%s' "$cmd" | base64 | tr -d '\n')
             echo "→ Running in '$name' (instance ''${INST_DIR##*/})…"
             echo "   sandy id: $BOX_NAME  ($BOX_SHORTID)"
-            python3 ${./vm-console-run.py} "$RUNNER" "$b64cmd"
+            # Stream the raw console to a log file (so a stuck boot is visible) and bound the run:
+            # the driver kills the VM and exits 124 when the timeout expires.
+            local to="''${TIMEOUT_OVERRIDE:-''${NIX_VM_TIMEOUT:-600}}"
+            to=$(_pos_int NIX_VM_TIMEOUT "$to") || return 2
+            local logdir="''${XDG_STATE_HOME:-$HOME/.local/state}/microvm/logs" log
+            mkdir -p "$logdir" && chmod 700 "$logdir"
+            find "$logdir" -name '*.log' -mtime +14 -delete 2>/dev/null || true
+            log="$logdir/$name-$(date +%Y%m%dT%H%M%S)-$$.log"
+            echo "   console log: $log  (timeout ''${to}s; watch with: tail -f)"
+            VM_RUN_TIMEOUT=$to VM_CONSOLE_LOG=$log python3 ${./vm-console-run.py} "$RUNNER" "$b64cmd"
+          }
+
+          # Boot <name> headlessly and check that every env var its secrets declare is set in the
+          # guest. Prints NAME + length only — the value never leaves the guest. Exit 1 if any is
+          # missing (e.g. `secrets` not granted this launch, a failed host fetch, or a stale boot).
+          #   vm doctor --secrets [trust opts] [--timeout S] <name>
+          vm_doctor_secrets() {
+            local -a orig=("$@")
+            _parse_launch_opts run "$@" || return 2
+            set -- "''${PARSE_REST[@]}"
+            local name=''${1:?'Usage: vm doctor --secrets [trust] [--timeout S] <name>'}
+            _in_list "$name" $DEFINED_VMS || { echo "✗ unknown VM '$name' (see: vm list)" >&2; return 2; }
+            local names="''${VM_SECRET_ENVS[$name]:-}"
+            [ -n "$names" ] || { echo "· $name: declares no env-var secrets — nothing to check"; return 0; }
+            GRANT=$(_resolve_grant "$mode" "$csv" "''${VM_TRUST_DEFAULT[$name]:-}") || return 2
+            _in_list secrets $GRANT || echo "⚠  secrets are not granted for this launch; expect MISSING (add --trust secrets)" >&2
+            local opts=$((''${#orig[@]} - ''${#PARSE_REST[@]}))
+            # Guest check (doctor-secrets-check.sh): name + length per variable, never the value.
+            local check="set -- $names; $(cat ${./doctor-secrets-check.sh})"
+            local rc=0
+            vm_run "''${orig[@]:0:$opts}" "$name" "$check" || rc=$?
+            [ "$rc" = 0 ] && echo "✓ $name: every expected secret env var is set" \
+              || echo "✗ $name: doctor --secrets failed (rc=$rc); see the console log above" >&2
+            return "$rc"
           }
 
           # Attach a shell to an already-running box over its reverse tunnel (Darwin/vfkit). Read-only:
@@ -1388,7 +1445,10 @@ in
             test)  vm_test "''${2:?'Usage: vm test <name> [timeout_s]'}" "''${3:-}"; ;;
             down)  vm_down "''${2:?'Usage: vm down <name>'}"; ;;
             list)  vm_list; ;;
-            doctor) shift; vm_doctor "$@"; ;;
+            doctor)
+              shift
+              if [ "''${1:-}" = --secrets ]; then shift; vm_doctor_secrets "$@"; else vm_doctor "$@"; fi
+              ;;
             builder)
               shift
               command -v nix-vm-builder >/dev/null 2>&1 \

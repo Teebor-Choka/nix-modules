@@ -3,7 +3,7 @@
 # Exercises the paths that don't require a running guest: usage, unknown command, `list`,
 # `doctor` skipping a not-running VM, and the `builder` macOS-only gate (on Linux).
 #
-# Usage: nix-vm-cli-suite.sh <path-to-nix-vm>
+# Usage: nix-vm-cli-suite.sh <path-to-nix-vm> <path-to-doctor-secrets-check.sh>
 set -uo pipefail
 vm=${1:?usage: nix-vm-cli-suite.sh <nix-vm>}
 pass=0; fail=0
@@ -144,6 +144,43 @@ out=$(VM_DEBUG_GRANT=1 "$vm" up --tun-passthrough smoke 2>&1); rc=$?
 # virtiofs share unconditionally, and vfkit dies with "stat secrets: no such file or directory".
 out=$(awk '/^else$/ { e = 1; next } e && /install -d -m 700 secrets/ { ok = 1 } /secrets withheld/ { print ok ? "yes" : "no"; exit }' "$vm"); rc=$?
 { [ "$rc" = 0 ] && [ "$out" = yes ]; } && ok "withheld secrets → share dir still created" || bad "withheld secrets share dir"
+
+# ── --timeout (run only) and `doctor --secrets` ────────────────────────────────
+out=$(VM_DEBUG_GRANT=1 "$vm" run --timeout 90 smoke true 2>&1); rc=$?
+{ [ "$rc" = 0 ] && grep -qx 'timeout: 90' <<<"$out"; } && ok "run --timeout 90 → resolved" || bad "timeout flag"
+
+out=$(VM_DEBUG_GRANT=1 "$vm" run smoke true 2>&1); rc=$?
+{ [ "$rc" = 0 ] && grep -qx 'timeout: <default>' <<<"$out"; } && ok "no --timeout → default" || bad "timeout default"
+
+out=$("$vm" run --timeout 0 smoke true 2>&1); rc=$?
+{ [ "$rc" = 2 ] && grep -qi 'must be > 0' <<<"$out"; } && ok "--timeout 0 → exit 2" || bad "timeout zero"
+
+out=$("$vm" up --timeout 5 smoke 2>&1); rc=$?
+{ [ "$rc" = 2 ] && grep -qi "only on 'vm run'" <<<"$out"; } && ok "up --timeout → rejected" || bad "up timeout reject"
+
+out=$("$vm" --help 2>&1)
+{ grep -q -- '--timeout' <<<"$out" && grep -q 'doctor --secrets' <<<"$out"; } && ok "usage lists --timeout + doctor --secrets" || bad "usage timeout/doctor-secrets"
+
+out=$("$vm" doctor --secrets bogus-vm 2>&1); rc=$?
+{ [ "$rc" = 2 ] && grep -qi "unknown VM 'bogus-vm'" <<<"$out"; } && ok "doctor --secrets unknown VM → exit 2" || bad "doctor secrets unknown"
+
+out=$("$vm" doctor --secrets 2>&1); rc=$?
+{ [ "$rc" != 0 ] && grep -qi 'Usage: vm doctor --secrets' <<<"$out"; } && ok "doctor --secrets no name → usage error" || bad "doctor secrets usage"
+
+# The baked expected-variable list holds names only (SMOKE_TOKEN), and the guest check prints
+# NAME + length, never the value. Run the real baked check against a fake env file.
+check_sh=${2:-}
+if [ -r "$check_sh" ]; then
+  fake=$(mktemp -d); mkdir -p "$fake/.local/share"
+  printf 'export SMOKE_TOKEN=%q\n' 'S3CR3T-fake-value' > "$fake/.local/share/injected-env.sh"
+  out=$(HOME="$fake" bash -c 'set -- SMOKE_TOKEN MISSING_ONE; . "$0"' "$check_sh" 2>&1); rc=$?
+  { [ "$rc" = 1 ] && grep -qx 'SMOKE_TOKEN length=17' <<<"$out" && grep -qx 'MISSING_ONE MISSING' <<<"$out" \
+    && ! grep -q 'S3CR3T' <<<"$out"; } \
+    && ok "doctor guest check: name+length only, MISSING → rc 1, no value" || bad "doctor guest check"
+  rm -rf "$fake"
+else
+  rc=0; out="usage: nix-vm-cli-suite.sh <nix-vm> <doctor-secrets-check.sh>"; bad "doctor guest check (script path missing)"
+fi
 
 echo "── nix-vm CLI suite: $pass passed, $fail failed ──"
 [ "$fail" = 0 ]

@@ -481,6 +481,11 @@
                     entry = "Test/Entry";
                     target.filePath = ".secret";
                   }
+                  {
+                    # An envName secret gives `vm doctor --secrets` a variable name to check.
+                    command = "echo unused";
+                    target.envName = "SMOKE_TOKEN";
+                  }
                 ];
               }
             ];
@@ -653,7 +658,7 @@
                 ];
               }
               ''
-                bash ${./tests/nix-vm-cli-suite.sh} ${vmHelperFor "x86_64-linux"}/bin/nix-vm
+                bash ${./tests/nix-vm-cli-suite.sh} ${vmHelperFor "x86_64-linux"}/bin/nix-vm ${./modules/microvms/doctor-secrets-check.sh}
                 touch "$out"
               '';
 
